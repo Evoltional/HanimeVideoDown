@@ -1,6 +1,7 @@
 import os
 import time
 import json
+import hashlib
 from typing import Optional, Dict, Any, List
 from PyQt5.QtCore import pyqtSignal, QObject
 from datetime import datetime
@@ -11,12 +12,21 @@ class LogEmitter(QObject):
 
 
 class TaskLogger:
-    """任务日志管理器，用于管理所有任务状态"""
+    """任务日志管理器，用于管理所有任务状态和视频进度"""
 
     def __init__(self, logger_dir: str = "./logger"):
         self.logger_dir = logger_dir
         self.pending_tasks_file = os.path.join(logger_dir, "pending_tasks.json")
         os.makedirs(logger_dir, exist_ok=True)
+
+        # 视频进度跟踪
+        self.video_progress = {}  # {video_id: progress}
+        self.video_status = {}  # {video_id: status}
+        self.video_titles = {}  # {video_id: title}
+
+    def _generate_video_id(self, video_url: str) -> str:
+        """生成视频ID"""
+        return hashlib.md5(video_url.encode()).hexdigest()[:8]
 
     def log_task_start(self, task_id: str, url: str, download_dir: str,
                        task_type: str = "playlist", retry_count: int = 0) -> None:
@@ -27,7 +37,7 @@ class TaskLogger:
                 "task_id": task_id,
                 "url": url,
                 "download_dir": download_dir,
-                "task_type": task_type,  # "playlist" or "video"
+                "task_type": task_type,
                 "status": "running",  # running, paused, completed, failed
                 "created_at": datetime.now().isoformat(),
                 "updated_at": datetime.now().isoformat(),
@@ -44,7 +54,7 @@ class TaskLogger:
         except Exception as e:
             print(f"记录任务开始失败: {str(e)}")
 
-    def log_video_task_start(self, task_id: str, video_url: str, video_id: str = None) -> None:
+    def log_video_task_start(self, task_id: str, video_url: str, video_title: str = None, video_id: str = None) -> None:
         """记录视频任务开始"""
         try:
             if video_id is None:
@@ -54,18 +64,44 @@ class TaskLogger:
             if task_id in tasks:
                 tasks[task_id]["video_tasks"][video_id] = {
                     "url": video_url,
-                    "status": "running",  # running, completed, failed
+                    "title": video_title or video_url,
+                    "status": "running",  # waiting, running, completed, failed
                     "start_time": datetime.now().isoformat(),
                     "end_time": None,
                     "error": None,
-                    "retry_count": 0
+                    "retry_count": 0,
+                    "progress": 0
                 }
                 tasks[task_id]["updated_at"] = datetime.now().isoformat()
                 self._save_tasks(tasks)
+
+                # 更新视频进度和状态
+                self.video_progress[video_id] = 0
+                self.video_status[video_id] = "running"
+                if video_title:
+                    self.video_titles[video_id] = video_title
         except Exception as e:
             print(f"记录视频任务开始失败: {str(e)}")
 
-    def log_video_task_complete(self, task_id: str, video_url: str, video_id: str = None) -> None:
+    def log_video_task_progress(self, task_id: str, video_url: str, progress: float, video_id: str = None) -> None:
+        """记录视频下载进度"""
+        try:
+            if video_id is None:
+                video_id = self._generate_video_id(video_url)
+
+            tasks = self._load_tasks()
+            if task_id in tasks and video_id in tasks[task_id]["video_tasks"]:
+                tasks[task_id]["video_tasks"][video_id]["progress"] = progress
+                tasks[task_id]["updated_at"] = datetime.now().isoformat()
+                self._save_tasks(tasks)
+
+                # 更新视频进度
+                self.video_progress[video_id] = progress
+        except Exception as e:
+            print(f"记录视频进度失败: {str(e)}")
+
+    def log_video_task_complete(self, task_id: str, video_url: str, video_title: str = None,
+                                video_id: str = None) -> None:
         """记录视频任务完成"""
         try:
             if video_id is None:
@@ -77,6 +113,9 @@ class TaskLogger:
                 if video_id in tasks[task_id]["video_tasks"]:
                     tasks[task_id]["video_tasks"][video_id]["status"] = "completed"
                     tasks[task_id]["video_tasks"][video_id]["end_time"] = datetime.now().isoformat()
+                    tasks[task_id]["video_tasks"][video_id]["progress"] = 100
+                    if video_title:
+                        tasks[task_id]["video_tasks"][video_id]["title"] = video_title
 
                 # 添加到完成列表
                 if video_url not in tasks[task_id]["completed_videos"]:
@@ -86,7 +125,7 @@ class TaskLogger:
                 if video_url in tasks[task_id]["failed_videos"]:
                     tasks[task_id]["failed_videos"].remove(video_url)
 
-                # 更新进度
+                # 更新任务进度
                 total = tasks[task_id]["total_videos"]
                 completed = len(tasks[task_id]["completed_videos"])
                 if total > 0:
@@ -94,10 +133,17 @@ class TaskLogger:
 
                 tasks[task_id]["updated_at"] = datetime.now().isoformat()
                 self._save_tasks(tasks)
+
+                # 更新视频状态
+                self.video_status[video_id] = "completed"
+                self.video_progress[video_id] = 100
+                if video_title:
+                    self.video_titles[video_id] = video_title
         except Exception as e:
             print(f"记录视频任务完成失败: {str(e)}")
 
-    def log_video_task_failed(self, task_id: str, video_url: str, error: str = "", video_id: str = None) -> None:
+    def log_video_task_failed(self, task_id: str, video_url: str, error: str = "", video_title: str = None,
+                              video_id: str = None) -> None:
         """记录视频任务失败"""
         try:
             if video_id is None:
@@ -111,6 +157,8 @@ class TaskLogger:
                     tasks[task_id]["video_tasks"][video_id]["end_time"] = datetime.now().isoformat()
                     tasks[task_id]["video_tasks"][video_id]["error"] = error
                     tasks[task_id]["video_tasks"][video_id]["retry_count"] += 1
+                    if video_title:
+                        tasks[task_id]["video_tasks"][video_id]["title"] = video_title
 
                 # 添加到失败列表
                 if video_url not in tasks[task_id]["failed_videos"]:
@@ -122,6 +170,12 @@ class TaskLogger:
 
                 tasks[task_id]["updated_at"] = datetime.now().isoformat()
                 self._save_tasks(tasks)
+
+                # 更新视频状态
+                self.video_status[video_id] = "failed"
+                self.video_progress[video_id] = 0
+                if video_title:
+                    self.video_titles[video_id] = video_title
         except Exception as e:
             print(f"记录视频任务失败失败: {str(e)}")
 
@@ -239,6 +293,15 @@ class TaskLogger:
                     tasks[task_id]["status"] = "failed"
                     tasks[task_id]["updated_at"] = datetime.now().isoformat()
                     self._save_tasks(tasks)
+
+                    # 清理该任务的视频进度数据
+                    for video_id in list(self.video_progress.keys()):
+                        video_info = self.get_video_info_by_id(task_id, video_id)
+                        if video_info:
+                            del self.video_progress[video_id]
+                            del self.video_status[video_id]
+                            if video_id in self.video_titles:
+                                del self.video_titles[video_id]
         except Exception as e:
             print(f"移除任务失败: {str(e)}")
 
@@ -264,6 +327,59 @@ class TaskLogger:
             print(f"重置任务状态失败: {str(e)}")
             return {}
 
+    def get_video_info_by_id(self, task_id: str, video_id: str) -> Optional[Dict[str, Any]]:
+        """通过视频ID获取视频信息"""
+        try:
+            tasks = self._load_tasks()
+            if task_id in tasks and video_id in tasks[task_id]["video_tasks"]:
+                return tasks[task_id]["video_tasks"][video_id]
+            return None
+        except Exception:
+            return None
+
+    def get_video_info_by_url(self, task_id: str, video_url: str) -> Optional[Dict[str, Any]]:
+        """通过视频URL获取视频信息"""
+        try:
+            video_id = self._generate_video_id(video_url)
+            return self.get_video_info_by_id(task_id, video_id)
+        except Exception:
+            return None
+
+    def get_video_progress(self, video_url: str) -> float:
+        """获取视频下载进度"""
+        try:
+            video_id = self._generate_video_id(video_url)
+            return self.video_progress.get(video_id, 0)
+        except Exception:
+            return 0
+
+    def get_video_status(self, video_url: str) -> str:
+        """获取视频状态"""
+        try:
+            video_id = self._generate_video_id(video_url)
+            return self.video_status.get(video_id, "unknown")
+        except Exception:
+            return "unknown"
+
+    def get_video_title(self, video_url: str) -> str:
+        """获取视频标题"""
+        try:
+            video_id = self._generate_video_id(video_url)
+            if video_id in self.video_titles:
+                return self.video_titles[video_id]
+
+            # 如果内存中没有，尝试从任务记录中查找
+            tasks = self._load_tasks()
+            for task_id, task_info in tasks.items():
+                for vid, video_info in task_info.get("video_tasks", {}).items():
+                    if vid == video_id and "title" in video_info:
+                        self.video_titles[vid] = video_info["title"]
+                        return video_info["title"]
+
+            return video_url  # 默认返回URL
+        except Exception:
+            return video_url
+
     def _load_tasks(self) -> Dict[str, Any]:
         """加载任务文件"""
         try:
@@ -271,11 +387,28 @@ class TaskLogger:
                 with open(self.pending_tasks_file, "r", encoding="utf-8") as f:
                     content = f.read().strip()
                     if content:
-                        return json.loads(content)
+                        tasks = json.loads(content)
+
+                        # 恢复视频进度数据
+                        self._restore_video_progress(tasks)
+
+                        return tasks
             return {}
         except Exception as e:
             print(f"加载任务文件失败: {str(e)}")
             return {}
+
+    def _restore_video_progress(self, tasks: Dict[str, Any]) -> None:
+        """从任务数据恢复视频进度"""
+        try:
+            for task_id, task_info in tasks.items():
+                for video_id, video_info in task_info.get("video_tasks", {}).items():
+                    self.video_progress[video_id] = video_info.get("progress", 0)
+                    self.video_status[video_id] = video_info.get("status", "unknown")
+                    if "title" in video_info:
+                        self.video_titles[video_id] = video_info["title"]
+        except Exception as e:
+            print(f"恢复视频进度失败: {str(e)}")
 
     def _save_tasks(self, tasks: Dict[str, Any]) -> None:
         """保存任务文件"""
@@ -289,6 +422,16 @@ class TaskLogger:
         """完全删除任务"""
         try:
             if task_id in tasks:
+                # 清理该任务的视频进度数据
+                for video_id in list(self.video_progress.keys()):
+                    video_info = self.get_video_info_by_id(task_id, video_id)
+                    if video_info:
+                        del self.video_progress[video_id]
+                        del self.video_status[video_id]
+                        if video_id in self.video_titles:
+                            del self.video_titles[video_id]
+
+                # 删除任务
                 del tasks[task_id]
                 self._save_tasks(tasks)
         except Exception as e:
@@ -305,11 +448,6 @@ class TaskLogger:
                 self._save_tasks(tasks)
         except Exception as e:
             print(f"清空失败状态失败: {str(e)}")
-
-    def _generate_video_id(self, video_url: str) -> str:
-        """生成视频ID"""
-        import hashlib
-        return hashlib.md5(video_url.encode()).hexdigest()[:8]
 
 
 def log_failure(logger_dir: str, filename: str, url: str, error: str = "") -> Optional[str]:

@@ -3,12 +3,14 @@ import os
 import time
 import uuid
 from typing import List, Dict, Any
+from collections import defaultdict
 
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtGui import QFont
 from PyQt5.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                              QLabel, QLineEdit, QPushButton, QTextEdit, QGroupBox,
-                             QScrollArea, QFrame, QFileDialog, QMessageBox, QCheckBox)
+                             QScrollArea, QFrame, QFileDialog, QMessageBox, QCheckBox,
+                             QProgressBar, QGridLayout, QSizePolicy)
 
 from ToolPart.DownloadThread import VideoDownloadThread
 from ToolPart.Logger import LogEmitter, TaskLogger
@@ -42,6 +44,77 @@ def update_task_status(task_frame: QFrame, status: str, color: str) -> None:
             resume_btn.setEnabled(False)
 
 
+class VideoProgressWidget(QWidget):
+    """单个视频进度显示组件"""
+
+    def __init__(self, task_id: str, video_title: str, parent=None):
+        super().__init__(parent)
+        self.task_id = task_id
+        self.video_title = video_title
+        self.init_ui()
+
+    def init_ui(self):
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(5, 5, 5, 5)
+        layout.setSpacing(10)
+
+        # 视频标题
+        self.title_label = QLabel(self.video_title)
+        self.title_label.setStyleSheet("color: #ecf0f1; font-size: 12px;")
+        self.title_label.setMaximumWidth(400)
+        self.title_label.setWordWrap(True)
+        self.title_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        layout.addWidget(self.title_label, 3)
+
+        # 进度条
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setTextVisible(True)
+        self.progress_bar.setStyleSheet("""
+            QProgressBar {
+                border: 1px solid #3498db;
+                border-radius: 5px;
+                background-color: #2c3e50;
+                text-align: center;
+                color: #ecf0f1;
+                font-size: 11px;
+            }
+            QProgressBar::chunk {
+                background-color: #3498db;
+                border-radius: 5px;
+            }
+        """)
+        layout.addWidget(self.progress_bar, 2)
+
+        # 状态标签
+        self.status_label = QLabel("等待中")
+        self.status_label.setStyleSheet("color: #95a5a6; font-size: 11px;")
+        self.status_label.setFixedWidth(80)
+        layout.addWidget(self.status_label, 1)
+
+    def update_progress(self, progress: float, status: str = None):
+        """更新进度"""
+        self.progress_bar.setValue(int(progress))
+        if status:
+            self.status_label.setText(status)
+            if status == "下载中":
+                self.status_label.setStyleSheet("color: #2ecc71; font-size: 11px;")
+            elif status == "已完成":
+                self.status_label.setStyleSheet("color: #3498db; font-size: 11px;")
+            elif status == "失败":
+                self.status_label.setStyleSheet("color: #e74c3c; font-size: 11px;")
+            elif status == "等待中":
+                self.status_label.setStyleSheet("color: #95a5a6; font-size: 11px;")
+
+    def set_title(self, title: str):
+        """设置视频标题"""
+        if len(title) > 40:
+            title = title[:37] + "..."
+        self.title_label.setText(title)
+        self.video_title = title
+
+
 class HanimeDownloaderApp(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -56,9 +129,9 @@ class HanimeDownloaderApp(QMainWindow):
         self.pause_all_btn = None
         self.download_btn = None
         self.download_path_label = None
-        self.headless_checkbox = None  # 无头模式复选框
+        self.headless_checkbox = None
         self.setWindowTitle("Hanime视频下载器")
-        self.setGeometry(100, 100, 800, 1100)
+        self.setGeometry(100, 100, 1000, 1200)  # 增大窗口高度
         self.setStyleSheet("""
             QMainWindow {
                 background-color: #2c3e50;
@@ -110,6 +183,7 @@ class HanimeDownloaderApp(QMainWindow):
                 border: 1px solid #3498db;
                 border-radius: 5px;
                 font-family: Consolas, Courier New;
+                font-size: 11px;
             }
             QScrollArea {
                 background-color: transparent;
@@ -145,19 +219,28 @@ class HanimeDownloaderApp(QMainWindow):
         """)
 
         self.active_threads: List[VideoDownloadThread] = []
-        self.pending_tasks: List[Dict[str, Any]] = []  # 等待队列
+        self.pending_tasks: List[Dict[str, Any]] = []
         self.log_emitter = LogEmitter()
-        self.task_logger = TaskLogger()  # 任务日志管理器
-        self.max_concurrent_tasks = 2  # 减少并发任务数
+        self.task_logger = TaskLogger()
+        self.max_concurrent_tasks = 2
+
+        # 视频进度管理
+        self.video_progress_widgets = {}  # {video_url: VideoProgressWidget}
+        self.task_videos = defaultdict(list)  # {task_id: [video_urls]}
+
+        # 视频进度更新定时器
+        self.progress_timer = QTimer()
+        self.progress_timer.timeout.connect(self.update_video_progresses)
+        self.progress_timer.start(1000)  # 每秒更新一次
 
         # 加载配置文件
         self.config = configparser.ConfigParser()
         self.config_file = "./config.ini"
         self.download_dir = self.load_config()
-        self.headless_mode = self.load_headless_config()  # 加载无头模式配置
+        self.headless_mode = self.load_headless_config()
 
         self.init_ui()
-        self.restore_pending_tasks()  # 恢复未完成任务
+        self.restore_pending_tasks()
 
         # 在 init_ui() 之后连接信号
         self.log_emitter.log_signal.connect(self.log_message)  # type: ignore
@@ -178,7 +261,6 @@ class HanimeDownloaderApp(QMainWindow):
         """加载无头模式配置"""
         if os.path.exists(self.config_file):
             self.config.read(self.config_file, encoding='utf-8')
-            # 默认为True（开启无头模式）
             return self.config.getboolean('Settings', 'HeadlessMode', fallback=True)
         return True
 
@@ -189,7 +271,108 @@ class HanimeDownloaderApp(QMainWindow):
             'HeadlessMode': str(self.headless_mode)
         }
         with open(self.config_file, 'w', encoding='utf-8') as configfile:
-            self.config.write(configfile)  # type: ignore
+            self.config.write(configfile)
+
+    def update_video_progresses(self):
+        """定时更新视频进度"""
+        try:
+            for task_id, videos in self.task_videos.items():
+                task_info = self.task_logger.get_task_info(task_id)
+                if task_info:
+                    video_tasks = task_info.get("video_tasks", {})
+                    for video_url in videos:
+                        # 生成视频ID
+                        import hashlib
+                        video_id = hashlib.md5(video_url.encode()).hexdigest()[:8]
+
+                        if video_id in video_tasks:
+                            video_info = video_tasks[video_id]
+                            status = video_info.get("status", "waiting")
+                            progress = 0
+
+                            if status == "running":
+                                progress = 50  # 下载中
+                            elif status == "completed":
+                                progress = 100
+                            elif status == "failed":
+                                progress = 0
+
+                            if video_url in self.video_progress_widgets:
+                                widget = self.video_progress_widgets[video_url]
+
+                                # 更新状态文本
+                                status_text = {
+                                    "waiting": "等待中",
+                                    "running": "下载中",
+                                    "completed": "已完成",
+                                    "failed": "失败"
+                                }.get(status, "未知")
+
+                                widget.update_progress(progress, status_text)
+        except Exception as e:
+            print(f"更新视频进度时出错: {str(e)}")
+
+    def add_video_progress(self, task_id: str, video_url: str, video_title: str = None):
+        """添加视频进度显示"""
+        if video_url in self.video_progress_widgets:
+            return
+
+        # 如果没有提供标题，使用URL的最后一部分
+        if not video_title:
+            import urllib.parse
+            parsed = urllib.parse.urlparse(video_url)
+            video_title = parsed.path.split('/')[-1]
+            if not video_title or len(video_title) < 5:
+                video_title = f"视频{len(self.video_progress_widgets) + 1}"
+
+        # 清理标题
+        import re
+        video_title = re.sub(r'[\\/*?:"<>|]', '_', video_title)
+        if len(video_title) > 40:
+            video_title = video_title[:37] + "..."
+
+        # 创建进度组件
+        widget = VideoProgressWidget(task_id, video_title)
+        self.video_progress_container.layout().addWidget(widget)
+        self.video_progress_widgets[video_url] = widget
+
+        # 添加到任务视频列表
+        self.task_videos[task_id].append(video_url)
+
+        # 调整容器高度
+        self.update_progress_container_height()
+
+    def remove_video_progress(self, video_url: str):
+        """移除视频进度显示"""
+        if video_url in self.video_progress_widgets:
+            widget = self.video_progress_widgets[video_url]
+            self.video_progress_container.layout().removeWidget(widget)
+            widget.deleteLater()
+            del self.video_progress_widgets[video_url]
+
+            # 从任务视频列表中移除
+            for task_id in list(self.task_videos.keys()):
+                if video_url in self.task_videos[task_id]:
+                    self.task_videos[task_id].remove(video_url)
+                    if not self.task_videos[task_id]:
+                        del self.task_videos[task_id]
+
+            # 调整容器高度
+            self.update_progress_container_height()
+
+    def update_progress_container_height(self):
+        """更新进度容器高度"""
+        count = len(self.video_progress_widgets)
+        if count == 0:
+            self.video_progress_container.setMaximumHeight(0)
+        else:
+            # 每个进度条大约50像素高
+            self.video_progress_container.setMaximumHeight(min(count * 50, 300))
+
+    def clear_all_video_progress(self):
+        """清除所有视频进度显示"""
+        for video_url in list(self.video_progress_widgets.keys()):
+            self.remove_video_progress(video_url)
 
     def restore_pending_tasks(self) -> None:
         """恢复未完成的任务"""
@@ -208,70 +391,21 @@ class HanimeDownloaderApp(QMainWindow):
                 self.log_message(f"恢复任务: {url} (状态: {status}, 类型: {task_type})")
 
                 # 创建任务显示框
-                task_frame = QFrame()
-                task_frame.setFrameShape(QFrame.StyledPanel)
-                task_frame.setObjectName(task_id)
-                task_frame.url = url
-                task_layout = QVBoxLayout(task_frame)
+                task_frame = self.create_task_frame(task_id, url, task_type, status)
 
-                # 显示任务类型
-                task_type_text = "播放列表" if task_type == "playlist" else "单视频"
-                if status == "failed":
-                    task_label_text = f"[失败]{task_type_text}: {url}"
-                elif task_info.get("is_retry", False):
-                    task_label_text = f"[重试]{task_type_text}: {url}"
-                else:
-                    task_label_text = f"{task_type_text}: {url}"
+                # 恢复视频进度显示
+                completed_videos = task_info.get("completed_videos", [])
+                failed_videos = task_info.get("failed_videos", [])
+                video_tasks = task_info.get("video_tasks", {})
 
-                task_label = QLabel(task_label_text)
-                task_label.setStyleSheet("color: #ecf0f1; font-weight: bold;")
-                task_layout.addWidget(task_label)
-
-                status_text = "失败" if status == "failed" else status
-                status_label = QLabel(f"状态: {status_text}")
-                status_label.setObjectName("status_label")
-                task_layout.addWidget(status_label)
-
-                # 显示进度信息
-                total_videos = task_info.get("total_videos", 0)
-                completed_videos = len(task_info.get("completed_videos", []))
-                failed_videos = len(task_info.get("failed_videos", []))
-
-                if total_videos > 0:
-                    progress_text = f"进度: {completed_videos}/{total_videos}"
-                    if failed_videos > 0:
-                        progress_text += f" (失败: {failed_videos})"
-
-                    progress_label = QLabel(progress_text)
-                    progress_label.setStyleSheet("color: #95a5a6;")
-                    task_layout.addWidget(progress_label)
-
-                # 按钮布局
-                button_layout = QHBoxLayout()
-
-                pause_btn = QPushButton("暂停")
-                pause_btn.setObjectName("pause_btn")
-                pause_btn.clicked.connect(lambda: self.pause_task(task_frame))  # type: ignore
-                button_layout.addWidget(pause_btn)
-
-                resume_btn = QPushButton("继续")
-                resume_btn.setObjectName("resume_btn")
-                resume_btn.clicked.connect(lambda: self.resume_task(task_frame))  # type: ignore
-                button_layout.addWidget(resume_btn)
-
-                delete_btn = QPushButton("删除")
-                delete_btn.setObjectName("delete_btn")
-                delete_btn.clicked.connect(lambda: self.delete_task(task_frame))  # type: ignore
-                button_layout.addWidget(delete_btn)
-
-                task_layout.addLayout(button_layout)
-                self.tasks_layout.addWidget(task_frame)
+                for video_url in completed_videos:
+                    self.add_video_progress(task_id, video_url, "已完成")
+                for video_url in failed_videos:
+                    self.add_video_progress(task_id, video_url, "失败")
 
                 # 根据状态设置颜色和按钮状态
                 if status == "paused":
-                    status_label.setStyleSheet("color: #f39c12;")
-                    pause_btn.setEnabled(False)
-                    resume_btn.setEnabled(True)
+                    update_task_status(task_frame, "已暂停", "#f39c12")
                     # 添加到队列但不立即启动
                     self.pending_tasks.append({
                         "url": url,
@@ -282,23 +416,19 @@ class HanimeDownloaderApp(QMainWindow):
                         "is_retry": task_info.get("is_retry", False)
                     })
                 elif status == "failed":
-                    status_label.setStyleSheet("color: #e74c3c;")
-                    pause_btn.setEnabled(False)
-                    resume_btn.setEnabled(True)  # 失败任务可以继续
+                    update_task_status(task_frame, "失败", "#e74c3c")
                     # 失败任务添加到队列末尾，状态为paused
                     self.pending_tasks.append({
                         "url": url,
                         "frame": task_frame,
                         "task_id": task_id,
                         "task_type": task_type,
-                        "status": "paused",  # 失败任务以暂停状态加入队列
-                        "is_retry": True  # 标记为重试
+                        "status": "paused",
+                        "is_retry": True
                     })
                 else:  # running or pending
                     color = "#2ecc71" if status == "running" else "#f39c12"
-                    status_label.setStyleSheet(f"color: {color};")
-                    pause_btn.setEnabled(status == "running")
-                    resume_btn.setEnabled(False)
+                    update_task_status(task_frame, "等待中" if status == "pending" else "运行中", color)
                     # 添加到等待队列
                     self.pending_tasks.append({
                         "url": url,
@@ -320,25 +450,94 @@ class HanimeDownloaderApp(QMainWindow):
         except Exception as e:
             self.log_message(f"恢复任务失败: {str(e)}")
 
+    def create_task_frame(self, task_id: str, url: str, task_type: str, status: str) -> QFrame:
+        """创建任务显示框"""
+        task_frame = QFrame()
+        task_frame.setFrameShape(QFrame.StyledPanel)
+        task_frame.setObjectName(task_id)
+        task_frame.url = url
+        task_layout = QVBoxLayout(task_frame)
+
+        # 显示任务类型
+        task_type_text = "播放列表" if task_type == "playlist" else "单视频"
+        if status == "failed":
+            task_label_text = f"[失败]{task_type_text}: {url}"
+        else:
+            task_label_text = f"{task_type_text}: {url}"
+
+        task_label = QLabel(task_label_text)
+        task_label.setStyleSheet("color: #ecf0f1; font-weight: bold;")
+        task_label.setWordWrap(True)
+        task_layout.addWidget(task_label)
+
+        status_text = "失败" if status == "failed" else status
+        status_label = QLabel(f"状态: {status_text}")
+        status_label.setObjectName("status_label")
+        task_layout.addWidget(status_label)
+
+        # 显示进度信息（如果有）
+        total_videos = 0
+        completed_videos = 0
+        failed_videos = 0
+
+        task_info = self.task_logger.get_task_info(task_id)
+        if task_info:
+            total_videos = task_info.get("total_videos", 0)
+            completed_videos = len(task_info.get("completed_videos", []))
+            failed_videos = len(task_info.get("failed_videos", []))
+
+        if total_videos > 0:
+            progress_text = f"进度: {completed_videos}/{total_videos}"
+            if failed_videos > 0:
+                progress_text += f" (失败: {failed_videos})"
+
+            progress_label = QLabel(progress_text)
+            progress_label.setStyleSheet("color: #95a5a6;")
+            task_layout.addWidget(progress_label)
+
+        # 按钮布局
+        button_layout = QHBoxLayout()
+
+        pause_btn = QPushButton("暂停")
+        pause_btn.setObjectName("pause_btn")
+        pause_btn.clicked.connect(lambda: self.pause_task(task_frame))
+        button_layout.addWidget(pause_btn)
+
+        resume_btn = QPushButton("继续")
+        resume_btn.setObjectName("resume_btn")
+        resume_btn.clicked.connect(lambda: self.resume_task(task_frame))
+        button_layout.addWidget(resume_btn)
+
+        delete_btn = QPushButton("删除")
+        delete_btn.setObjectName("delete_btn")
+        delete_btn.clicked.connect(lambda: self.delete_task(task_frame))
+        button_layout.addWidget(delete_btn)
+
+        task_layout.addLayout(button_layout)
+        self.tasks_layout.addWidget(task_frame)
+
+        return task_frame
+
     def init_ui(self) -> None:
         """初始化用户界面"""
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
 
         main_layout = QVBoxLayout(central_widget)
-        main_layout.setSpacing(15)
-        main_layout.setContentsMargins(20, 20, 20, 20)
+        main_layout.setSpacing(10)  # 减少间距
+        main_layout.setContentsMargins(15, 15, 15, 15)
 
         # 标题
         title_label = QLabel("Hanime视频下载器")
         title_label.setFont(QFont("Arial", 18, QFont.Bold))
         title_label.setAlignment(Qt.AlignCenter)
-        title_label.setStyleSheet("color: #3498db; margin-bottom: 20px;")
+        title_label.setStyleSheet("color: #3498db; margin-bottom: 10px;")
         main_layout.addWidget(title_label)
 
         # 下载路径设置区域
         path_group = QGroupBox("下载路径设置")
         path_layout = QVBoxLayout(path_group)
+        path_group.setMaximumHeight(80)
 
         path_control_layout = QHBoxLayout()
         self.download_path_label = QLabel(f"当前下载路径: {self.download_dir}")
@@ -346,7 +545,7 @@ class HanimeDownloaderApp(QMainWindow):
         path_control_layout.addWidget(self.download_path_label)
 
         change_path_btn = QPushButton("更改路径")
-        change_path_btn.clicked.connect(self.change_download_path)  # type: ignore
+        change_path_btn.clicked.connect(self.change_download_path)
         path_control_layout.addWidget(change_path_btn)
 
         path_layout.addLayout(path_control_layout)
@@ -355,60 +554,90 @@ class HanimeDownloaderApp(QMainWindow):
         # 输入区域
         input_group = QGroupBox("输入视频列表链接")
         input_layout = QVBoxLayout(input_group)
+        input_group.setMaximumHeight(120)
 
         # 创建输入框、粘贴按钮和无头模式开关的水平布局
         url_input_layout = QHBoxLayout()
 
         self.url_input = QLineEdit()
         self.url_input.setPlaceholderText("例如: https://hanime1.me/watch?v=????")
-        url_input_layout.addWidget(self.url_input, 1)  # 添加拉伸因子1，让输入框占据更多空间
+        url_input_layout.addWidget(self.url_input, 1)
 
         # 添加粘贴按钮
         paste_btn = QPushButton("粘贴")
-        paste_btn.setFixedWidth(100)  # 设置固定宽度
-        paste_btn.clicked.connect(self.paste_clipboard)  # type: ignore
+        paste_btn.setFixedWidth(80)
+        paste_btn.clicked.connect(self.paste_clipboard)
         url_input_layout.addWidget(paste_btn)
 
         # 添加无头模式开关
         self.headless_checkbox = QCheckBox("无头模式")
         self.headless_checkbox.setChecked(self.headless_mode)
-        self.headless_checkbox.stateChanged.connect(self.on_headless_changed)  # type: ignore
+        self.headless_checkbox.stateChanged.connect(self.on_headless_changed)
         url_input_layout.addWidget(self.headless_checkbox)
 
         input_layout.addLayout(url_input_layout)
 
-        # 按钮布局 - 现在有4个按钮
+        # 按钮布局
         button_layout = QHBoxLayout()
 
         self.download_btn = QPushButton("开始下载")
-        self.download_btn.clicked.connect(self.start_download)  # type: ignore
+        self.download_btn.clicked.connect(self.start_download)
         button_layout.addWidget(self.download_btn)
 
-        self.pause_all_btn = QPushButton("暂停所有任务")
-        self.pause_all_btn.clicked.connect(self.pause_all_tasks)  # type: ignore
+        self.pause_all_btn = QPushButton("暂停所有")
+        self.pause_all_btn.clicked.connect(self.pause_all_tasks)
         button_layout.addWidget(self.pause_all_btn)
 
-        self.resume_all_btn = QPushButton("继续所有任务")
-        self.resume_all_btn.clicked.connect(self.resume_all_tasks)  # type: ignore
+        self.resume_all_btn = QPushButton("继续所有")
+        self.resume_all_btn.clicked.connect(self.resume_all_tasks)
         button_layout.addWidget(self.resume_all_btn)
 
-        self.delete_all_btn = QPushButton("删除所有任务")
-        self.delete_all_btn.clicked.connect(self.delete_all_tasks)  # type: ignore
+        self.delete_all_btn = QPushButton("删除所有")
+        self.delete_all_btn.clicked.connect(self.delete_all_tasks)
         self.delete_all_btn.setEnabled(False)
         button_layout.addWidget(self.delete_all_btn)
 
         input_layout.addLayout(button_layout)
         main_layout.addWidget(input_group)
 
-        # 日志区域
+        # 日志区域（缩小显示区域）
         log_group = QGroupBox("下载日志")
         log_layout = QVBoxLayout(log_group)
+        log_group.setMaximumHeight(150)  # 设置最大高度
 
         self.log_area = QTextEdit()
         self.log_area.setReadOnly(True)
+        self.log_area.setMaximumHeight(120)  # 设置高度
         log_layout.addWidget(self.log_area)
 
         main_layout.addWidget(log_group)
+
+        # 视频下载进度区域（新增）
+        progress_group = QGroupBox("视频下载进度")
+        progress_layout = QVBoxLayout(progress_group)
+
+        # 创建滚动区域
+        progress_scroll = QScrollArea()
+        progress_scroll.setWidgetResizable(True)
+        progress_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+
+        # 进度容器
+        self.video_progress_container = QWidget()
+        self.video_progress_container.setObjectName("video_progress_container")
+        self.video_progress_container.setStyleSheet("background-color: #2c3e50;")
+        progress_layout_container = QVBoxLayout(self.video_progress_container)
+        progress_layout_container.setAlignment(Qt.AlignTop)
+        progress_layout_container.setSpacing(5)
+        progress_layout_container.setContentsMargins(5, 5, 5, 5)
+
+        # 设置初始高度为0
+        self.video_progress_container.setMaximumHeight(0)
+
+        progress_scroll.setWidget(self.video_progress_container)
+        progress_layout.addWidget(progress_scroll)
+
+        progress_group.setMaximumHeight(200)  # 设置最大高度
+        main_layout.addWidget(progress_group)
 
         # 活动任务区域
         tasks_group = QGroupBox("活动下载任务")
@@ -420,13 +649,13 @@ class HanimeDownloaderApp(QMainWindow):
         self.tasks_container.setObjectName("tasks_container")
         self.tasks_layout = QVBoxLayout(self.tasks_container)
         self.tasks_layout.setAlignment(Qt.AlignTop)
-        self.tasks_layout.setSpacing(10)
+        self.tasks_layout.setSpacing(5)  # 减少间距
         self.tasks_layout.setContentsMargins(5, 5, 5, 5)
 
         self.tasks_scroll.setWidget(self.tasks_container)
         tasks_layout.addWidget(self.tasks_scroll)
 
-        main_layout.addWidget(tasks_group)
+        main_layout.addWidget(tasks_group, 1)  # 给任务区域更多空间
 
         # 状态栏
         self.status_bar = self.statusBar()
@@ -445,7 +674,6 @@ class HanimeDownloaderApp(QMainWindow):
     def paste_clipboard(self) -> None:
         """粘贴剪贴板内容到输入框"""
         try:
-            # 导入剪贴板模块
             from PyQt5.QtWidgets import QApplication
 
             # 获取剪贴板内容
@@ -469,8 +697,35 @@ class HanimeDownloaderApp(QMainWindow):
                 task_id = parts[1]
                 playlist_title = parts[2]
                 self.update_task_title(task_id, playlist_title)
+        elif message.startswith("[VIDEO_START]|||"):
+            parts = message.split("|||")
+            if len(parts) >= 3:
+                task_id = parts[1]
+                video_url = parts[2]
+                # 添加视频进度显示
+                self.add_video_progress(task_id, video_url)
+        elif message.startswith("[VIDEO_PROGRESS]|||"):
+            # 进度消息不再显示在日志中，只更新进度条
+            pass
+        elif message.startswith("[VIDEO_COMPLETE]|||"):
+            parts = message.split("|||")
+            if len(parts) >= 3:
+                task_id = parts[1]
+                video_url = parts[2]
+                # 视频完成，更新状态
+                if video_url in self.video_progress_widgets:
+                    self.video_progress_widgets[video_url].update_progress(100, "已完成")
+        elif message.startswith("[VIDEO_FAILED]|||"):
+            parts = message.split("|||")
+            if len(parts) >= 4:
+                task_id = parts[1]
+                video_url = parts[2]
+                error = parts[3]
+                # 视频失败，更新状态
+                if video_url in self.video_progress_widgets:
+                    self.video_progress_widgets[video_url].update_progress(0, "失败")
         else:
-            timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+            timestamp = time.strftime("%H:%M:%S")
             self.log_area.append(f"[{timestamp}] {message}")
             # 自动滚动到底部
             self.log_area.verticalScrollBar().setValue(
@@ -508,42 +763,7 @@ class HanimeDownloaderApp(QMainWindow):
         self.task_logger.log_task_start(task_id, url, self.download_dir)
 
         # 创建任务显示框
-        task_frame = QFrame()
-        task_frame.setFrameShape(QFrame.StyledPanel)
-        task_frame.setObjectName(task_id)
-        task_frame.url = url
-        task_layout = QVBoxLayout(task_frame)
-
-        task_label = QLabel(f"播放列表: {url}")
-        task_label.setStyleSheet("color: #ecf0f1; font-weight: bold;")
-        task_layout.addWidget(task_label)
-
-        status_label = QLabel("状态: 等待中")
-        status_label.setStyleSheet("color: #f39c12;")
-        status_label.setObjectName("status_label")
-        task_layout.addWidget(status_label)
-
-        # 按钮布局
-        button_layout = QHBoxLayout()
-
-        pause_btn = QPushButton("暂停")
-        pause_btn.setObjectName("pause_btn")
-        pause_btn.clicked.connect(lambda: self.pause_task(task_frame))  # type: ignore
-        button_layout.addWidget(pause_btn)
-
-        resume_btn = QPushButton("继续")
-        resume_btn.setObjectName("resume_btn")
-        resume_btn.setEnabled(False)
-        resume_btn.clicked.connect(lambda: self.resume_task(task_frame))  # type: ignore
-        button_layout.addWidget(resume_btn)
-
-        delete_btn = QPushButton("删除")
-        delete_btn.setObjectName("delete_btn")
-        delete_btn.clicked.connect(lambda: self.delete_task(task_frame))  # type: ignore
-        button_layout.addWidget(delete_btn)
-
-        task_layout.addLayout(button_layout)
-        self.tasks_layout.addWidget(task_frame)
+        task_frame = self.create_task_frame(task_id, url, "playlist", "等待中")
 
         # 检查当前活动任务数量
         active_count = sum(1 for thread in self.active_threads
@@ -580,7 +800,7 @@ class HanimeDownloaderApp(QMainWindow):
             self.task_logger.update_task_status(task_id, "running")
 
         thread = VideoDownloadThread(url, self.download_dir, task_id,
-                                     self.task_logger, is_retry, self.headless_mode)  # 传递headless参数
+                                     self.task_logger, is_retry, self.headless_mode)
         thread.task_frame = task_frame
         thread.task_id = task_id
 
@@ -600,7 +820,7 @@ class HanimeDownloaderApp(QMainWindow):
         task_frame = None
 
         for t in self.active_threads:
-            if t.task_id == task_id:
+            if hasattr(t, 'task_id') and t.task_id == task_id:
                 thread = t
                 task_frame = t.task_frame
                 break
@@ -682,6 +902,11 @@ class HanimeDownloaderApp(QMainWindow):
             self.log_message(f"任务 {task_id} 完成")
             if task_frame and task_frame.parent():
                 task_frame.deleteLater()
+
+            # 清除该任务的视频进度显示
+            for video_url in list(self.video_progress_widgets.keys()):
+                if video_url in self.task_videos.get(task_id, []):
+                    self.remove_video_progress(video_url)
         else:
             self.log_message(f"任务 {task_id} 状态: {status}")
 
@@ -830,6 +1055,11 @@ class HanimeDownloaderApp(QMainWindow):
                 # 从pending_tasks中移除
                 self.pending_tasks = [t for t in self.pending_tasks if t["frame"] != task_frame]
 
+                # 清除该任务的视频进度显示
+                for video_url in list(self.video_progress_widgets.keys()):
+                    if video_url in self.task_videos.get(task_id, []):
+                        self.remove_video_progress(video_url)
+
                 self.start_next_task()
                 return
 
@@ -845,6 +1075,12 @@ class HanimeDownloaderApp(QMainWindow):
 
                 if task_frame and task_frame.parent():
                     task_frame.deleteLater()
+
+                # 清除该任务的视频进度显示
+                for video_url in list(self.video_progress_widgets.keys()):
+                    if video_url in self.task_videos.get(task_id, []):
+                        self.remove_video_progress(video_url)
+
                 self.update_queue_status()
                 return
 
@@ -861,6 +1097,10 @@ class HanimeDownloaderApp(QMainWindow):
                 task_id = thread.task_id
                 if self.task_logger:
                     self.task_logger.update_task_status(task_id, "paused")
+
+                # 更新任务显示状态
+                if hasattr(thread, 'task_frame'):
+                    update_task_status(thread.task_frame, "已暂停", "#f39c12")
             except Exception as e:
                 self.log_message(f"暂停任务时出错: {str(e)}")
 
@@ -886,6 +1126,10 @@ class HanimeDownloaderApp(QMainWindow):
                 task_id = thread.task_id
                 if self.task_logger:
                     self.task_logger.update_task_status(task_id, "running")
+
+                # 更新任务显示状态
+                if hasattr(thread, 'task_frame'):
+                    update_task_status(thread.task_frame, "运行中", "#2ecc71")
             except Exception as e:
                 self.log_message(f"继续任务时出错: {str(e)}")
 
@@ -926,7 +1170,7 @@ class HanimeDownloaderApp(QMainWindow):
                 self.log_message(f"删除任务时出错: {str(e)}")
 
         # 删除所有等待任务
-        for task in self.pending_tasks:
+        for task in self.pending_tasks[:]:  # 使用副本遍历
             try:
                 self.log_message(f"已删除任务: {task['url']}")
 
@@ -939,6 +1183,9 @@ class HanimeDownloaderApp(QMainWindow):
                     task["frame"].deleteLater()
             except Exception as e:
                 self.log_message(f"删除任务时出错: {str(e)}")
+
+        # 清除所有视频进度显示
+        self.clear_all_video_progress()
 
         # 清除所有列表
         self.active_threads.clear()
