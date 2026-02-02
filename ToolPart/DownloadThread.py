@@ -4,10 +4,11 @@ import re
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Optional, List, Tuple
+from typing import Optional, List, Tuple, Dict
 import requests
 from PyQt5.QtCore import QThread, pyqtSignal
 from ToolPart.Browser import get_browser
+from ToolPart.ByPasser import CloudflareByPasser
 from ToolPart.Logger import log_failure, TaskLogger
 
 
@@ -19,18 +20,18 @@ class VideoDownloadThread(QThread):
 
     def __init__(self, list_url: str, download_dir: str, task_id: str,
                  task_logger: Optional[TaskLogger] = None, is_retry: bool = False,
-                 headless: bool = True):  # 添加headless参数
+                 headless: bool = True):
         super().__init__()
         self.list_url = list_url
         self.download_dir = download_dir
         self.task_id = task_id
         self.task_logger = task_logger
-        self.is_retry = is_retry  # 是否是重试任务
-        self.headless = headless  # 保存headless参数
+        self.is_retry = is_retry
+        self.headless = headless
         self.running = True
         self.paused = False
         self.pause_cond = threading.Condition(threading.Lock())
-        self.max_workers = 2  # 减少并发数，避免资源冲突
+        self.max_workers = 1  # 减少并发数，避免触发Cloudflare验证
         os.makedirs(self.download_dir, exist_ok=True)
 
         # 确保日志目录存在
@@ -39,6 +40,10 @@ class VideoDownloadThread(QThread):
 
         # 定义非法字符的正则表达式模式
         self.illegal_chars_pattern = re.compile(r'[\\/*?:"<>|]')
+
+        # 失败重试配置
+        self.max_download_retries = 3
+        self.retry_delay = 5  # 重试延迟（秒）
 
     def sanitize_filename(self, filename: str) -> str:
         """清洗文件名，移除非法字符"""
@@ -98,6 +103,40 @@ class VideoDownloadThread(QThread):
             while self.paused and self.running:
                 self.pause_cond.wait()
 
+    def handle_browser_navigation(self, browser, url: str, page_type: str = "list") -> bool:
+        """处理浏览器导航，包括turnstile验证"""
+        try:
+            self.log_message(f"访问{page_type}页面: {url}")
+            browser.get(url)
+
+            # 如果不是无头模式，记录日志
+            if not self.headless:
+                self.log_message(f"非无头模式：{page_type}页面已打开")
+
+            # 创建CloudflareByPasser实例
+            cf_bypasser = CloudflareByPasser(
+                driver=browser,
+                max_retries=3,
+                log_emitter=None  # 暂时不传递，避免循环引用
+            )
+
+            # 处理Cloudflare挑战
+            self.log_message(f"处理{page_type}页面的Cloudflare验证...")
+            if not cf_bypasser.bypass():
+                self.log_message(f"{page_type}页面Cloudflare验证失败")
+                return False
+
+            self.log_message(f"{page_type}页面Cloudflare验证通过")
+
+            # 等待页面完全加载
+            time.sleep(2)
+
+            return True
+
+        except Exception as e:
+            self.log_message(f"访问{page_type}页面时出错: {str(e)}")
+            return False
+
     def get_video_links(self) -> Tuple[Optional[List[str]], Optional[str]]:
         """获取列表页中的所有视频链接和播放列表标题"""
         self.log_message(f"正在从 {self.list_url} 获取视频列表...")
@@ -106,12 +145,11 @@ class VideoDownloadThread(QThread):
         playlist_title: Optional[str] = None
 
         try:
-            browser = get_browser(self.headless)  # 使用headless参数
-            browser.get(self.list_url)
+            browser = get_browser(self.headless)
 
-            # 如果不是无头模式，记录日志
-            if not self.headless:
-                self.log_message("非无头模式：浏览器窗口已打开，请查看浏览器界面")
+            # 处理列表页导航和验证
+            if not self.handle_browser_navigation(browser, self.list_url, "列表"):
+                return None, None
 
             # 使用条件等待替代固定等待
             start_time = time.time()
@@ -167,7 +205,7 @@ class VideoDownloadThread(QThread):
         return links, playlist_title
 
     def download_video(self, video_url: str) -> bool:
-        """下载单个视频，增加失败重试机制"""
+        """下载单个视频，增强失败重试机制"""
         if not self.running:
             return False
 
@@ -175,7 +213,8 @@ class VideoDownloadThread(QThread):
         if self.task_logger:
             self.task_logger.log_video_task_start(self.task_id, video_url)
 
-        max_retries = 2  # 减少重试次数
+        # 增强的重试配置
+        max_retries = self.max_download_retries
         retry_count = 0
         success = False
         last_error = ""
@@ -189,14 +228,16 @@ class VideoDownloadThread(QThread):
                 if not success:
                     last_error = error
                     if retry_count <= max_retries:
-                        self.log_message(f"第 {retry_count} 次下载失败，稍后重试...")
-                        time.sleep(1 + random.random())  # 减少等待时间
+                        wait_time = self.retry_delay * retry_count  # 指数退避
+                        self.log_message(f"第 {retry_count} 次下载失败，等待 {wait_time} 秒后重试...")
+                        time.sleep(wait_time + random.random())
                 else:
                     filename = file
             except Exception as e:
                 last_error = str(e)
                 self.log_message(f"下载过程中发生异常: {str(e)}")
-                time.sleep(2)
+                if retry_count <= max_retries:
+                    time.sleep(self.retry_delay)
 
         if success:
             self.log_message(f"成功下载视频: {video_url}")
@@ -217,23 +258,22 @@ class VideoDownloadThread(QThread):
             return False
 
     def _download_video_attempt(self, video_url: str) -> Tuple[bool, str, Optional[str]]:
-        """单个视频下载尝试，返回（是否成功，错误信息，文件名）"""
+        """单个视频下载尝试，增强错误处理"""
         self.log_message(f"处理视频: {video_url}")
         browser = None
         filename = None
 
         try:
-            browser = get_browser(self.headless)  # 使用headless参数
-            browser.get(video_url)
+            browser = get_browser(self.headless)
 
-            # 如果不是无头模式，记录日志
-            if not self.headless:
-                self.log_message("非无头模式：正在打开视频页面...")
+            # 处理视频页导航和验证
+            if not self.handle_browser_navigation(browser, video_url, "视频"):
+                return False, "视频页面访问失败", None
 
             # 使用条件等待替代固定等待
             start_time = time.time()
             download_btn = None
-            while time.time() - start_time < 20:
+            while time.time() - start_time < 30:  # 增加超时时间
                 self.wait_if_paused()
                 if not self.running:
                     return False, "任务已停止", None
@@ -254,42 +294,29 @@ class VideoDownloadThread(QThread):
                 return False, error_msg, None
 
             self.log_message(f"找到下载页面: {download_page_url}")
-            browser.get(download_page_url)
 
-            # 如果不是无头模式，记录日志
-            if not self.headless:
-                self.log_message("非无头模式：正在打开下载页面...")
-
-            # 等待Cloudflare验证
-            start_time = time.time()
-            while time.time() - start_time < 30:
-                self.wait_if_paused()
-                if not self.running:
-                    return False, "任务已停止", None
-
-                if "just a moment" not in browser.title.lower():
-                    break
-                time.sleep(1)
-            else:
-                error_msg = "等待Cloudflare验证完成超时"
-                self.log_message(error_msg)
-                return False, error_msg, None
+            # 处理下载页导航和验证
+            if not self.handle_browser_navigation(browser, download_page_url, "下载"):
+                return False, "下载页面访问失败", None
 
             # 定位下载链接
-            download_table = browser.ele('#content-div', timeout=10)
+            download_table = browser.ele('#content-div', timeout=15)  # 增加超时
             if not download_table:
                 error_msg = "未找到下载表格"
                 self.log_message(error_msg)
                 return False, error_msg, None
 
-            download_link_ele = download_table.ele('xpath:.//tr[2]/td[5]/a', timeout=10)
+            download_link_ele = download_table.ele('xpath:.//tr[2]/td[5]/a', timeout=15)
             if not download_link_ele:
                 error_msg = "未找到下载链接元素"
                 self.log_message(error_msg)
                 return False, error_msg, None
 
             video_download_url = download_link_ele.attr('data-url')
-            raw_filename = download_link_ele.attr('download') + '.mp4'
+            raw_filename = download_link_ele.attr('download')
+
+            if not raw_filename.endswith('.mp4'):
+                raw_filename += '.mp4'
 
             filename = self.sanitize_filename(raw_filename)
             self.log_message(f"原始文件名: {raw_filename} -> 清洗后: {filename}")
@@ -297,7 +324,8 @@ class VideoDownloadThread(QThread):
             # 检查文件是否已存在
             filepath = os.path.join(self.download_dir, filename)
             if os.path.exists(filepath) and os.path.isfile(filepath):
-                self.log_message(f"文件已存在，跳过下载: {filename}")
+                file_size = os.path.getsize(filepath)
+                self.log_message(f"文件已存在，大小: {file_size} 字节，跳过下载: {filename}")
                 return True, "文件已存在，跳过下载", filename
 
             if not video_download_url or not filename:
@@ -323,7 +351,7 @@ class VideoDownloadThread(QThread):
                     self.log_message(f"关闭浏览器时出错: {str(e)}")
 
     def save_video(self, url: str, filename: str) -> Tuple[bool, str]:
-        """保存视频文件，返回（是否成功，错误信息）"""
+        """保存视频文件，增强错误处理"""
         clean_filename = self.sanitize_filename(filename)
         filepath = os.path.join(self.download_dir, clean_filename)
 
@@ -333,16 +361,39 @@ class VideoDownloadThread(QThread):
         try:
             # 最终检查文件是否存在
             if os.path.exists(filepath) and os.path.isfile(filepath):
-                self.log_message(f"文件已存在，跳过下载: {clean_filename}")
+                file_size = os.path.getsize(filepath)
+                self.log_message(f"文件已存在，大小: {file_size} 字节，跳过下载: {clean_filename}")
                 return True, "文件已存在，跳过下载"
 
             headers = {
                 'Referer': 'https://hanime1.me/',
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept': '*/*',
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Accept-Encoding': 'gzip, deflate, br',
+                'Connection': 'keep-alive',
+                'Sec-Fetch-Dest': 'video',
+                'Sec-Fetch-Mode': 'no-cors',
+                'Sec-Fetch-Site': 'cross-site',
             }
 
             session = requests.Session()
-            response = session.get(url, headers=headers, stream=True, timeout=60)
+
+            # 增加重试机制
+            from requests.adapters import HTTPAdapter
+            from urllib3.util.retry import Retry
+
+            retry_strategy = Retry(
+                total=3,
+                backoff_factor=1,
+                status_forcelist=[429, 500, 502, 503, 504],
+                allowed_methods=["GET"]
+            )
+            adapter = HTTPAdapter(max_retries=retry_strategy)
+            session.mount("http://", adapter)
+            session.mount("https://", adapter)
+
+            response = session.get(url, headers=headers, stream=True, timeout=(10, 300))  # 增加超时时间
             response.raise_for_status()
 
             total_size = int(response.headers.get('content-length', 0))
@@ -367,10 +418,18 @@ class VideoDownloadThread(QThread):
                         if total_size > 0:
                             percent = (downloaded / total_size) * 100
                             if abs(percent - last_percent) > 1 or percent == 100:
-                                self.log_message(f"下载进度: {clean_filename} - {percent:.1f}%")
+                                self.log_message(
+                                    f"下载进度: {clean_filename} - {percent:.1f}% ({downloaded}/{total_size} bytes)")
                                 last_percent = percent
 
-            self.log_message(f"成功保存: {filepath}")
+            # 验证文件大小
+            if total_size > 0:
+                actual_size = os.path.getsize(filepath)
+                if actual_size < total_size * 0.9:  # 如果文件大小小于预期的90%
+                    os.remove(filepath)
+                    return False, f"文件大小不匹配: 预期 {total_size} 字节，实际 {actual_size} 字节"
+
+            self.log_message(f"成功保存: {filepath} (大小: {os.path.getsize(filepath)} 字节)")
             return True, ""
 
         except Exception as e:
@@ -379,12 +438,13 @@ class VideoDownloadThread(QThread):
             if os.path.exists(filepath):
                 try:
                     os.remove(filepath)
+                    self.log_message(f"已删除不完整的文件: {clean_filename}")
                 except Exception:
                     pass
             return False, error_msg
 
     def run(self) -> None:
-        """运行下载任务"""
+        """运行下载任务，优化并发控制"""
         failed_downloads: List[str] = []
 
         try:
@@ -404,9 +464,13 @@ class VideoDownloadThread(QThread):
 
             self.log_message(f"找到 {len(video_links)} 个视频")
 
+            # 优化并发控制：根据视频数量和网络状况调整
+            actual_max_workers = min(self.max_workers, len(video_links))
+            self.log_message(f"使用 {actual_max_workers} 个并发下载线程")
+
             # 使用线程池并发下载视频
-            with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-                futures = []
+            with ThreadPoolExecutor(max_workers=actual_max_workers) as executor:
+                futures = {}
                 for i, link in enumerate(video_links):
                     if not self.running:
                         break
@@ -417,46 +481,48 @@ class VideoDownloadThread(QThread):
 
                     self.log_message(f"提交下载任务: 视频 {i + 1}/{len(video_links)}")
                     future = executor.submit(self.download_video, link)
-                    futures.append(future)
-                    time.sleep(random.uniform(0.5, 1.0))  # 减少等待时间
+                    futures[future] = link
+
+                    # 根据并发数调整提交间隔
+                    wait_time = random.uniform(1.0, 2.0)
+                    time.sleep(wait_time)
 
                 # 等待所有任务完成
-                for i, future in enumerate(as_completed(futures)):
+                for future in as_completed(futures):
                     if not self.running:
-                        for f in futures:
+                        for f in futures.keys():
                             if not f.done():
                                 f.cancel()
                         self.log_message("下载任务已取消")
                         break
 
+                    link = futures[future]
                     try:
-                        success = future.result(timeout=1800)  # 30分钟超时
+                        success = future.result(timeout=3600)  # 60分钟超时
                         if success:
-                            self.log_message(f"视频 {i + 1} 下载成功")
+                            self.log_message(f"视频下载成功: {link}")
                         else:
-                            self.log_message(f"视频 {i + 1} 下载失败")
-                            if i < len(video_links):
-                                failed_downloads.append(video_links[i])
+                            self.log_message(f"视频下载失败: {link}")
+                            failed_downloads.append(link)
                     except Exception as e:
                         self.log_message(f"视频下载出错: {str(e)}")
-                        if i < len(video_links):
-                            failed_downloads.append(video_links[i])
+                        failed_downloads.append(link)
 
-            # 检查任务状态
+            # 更新任务状态
             if self.task_logger:
-                task_info = self.task_logger.get_task_info(self.task_id)
-                if task_info:
-                    if failed_downloads:
-                        # 有失败视频，标记任务失败
-                        self.task_logger.update_task_status(self.task_id, "failed")
-                    else:
-                        # 所有视频都成功，标记任务完成
-                        self.task_logger.update_task_status(self.task_id, "completed")
+                if failed_downloads:
+                    self.task_logger.update_task_status(self.task_id, "failed")
+                else:
+                    self.task_logger.update_task_status(self.task_id, "completed")
 
             # 发送完成信号
             if self.running:
                 self.finished_signal.emit(self.task_id, failed_downloads)
-                self.log_message(f"下载任务完成: {self.list_url}")
+                if failed_downloads:
+                    self.log_message(
+                        f"下载任务部分完成: {self.list_url} (失败: {len(failed_downloads)}/{len(video_links)})")
+                else:
+                    self.log_message(f"下载任务完成: {self.list_url}")
 
         except Exception as e:
             self.log_message(f"下载任务异常: {str(e)}")
