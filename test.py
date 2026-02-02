@@ -46,10 +46,10 @@ class VideoDownloader:
                     return None, None
 
                 # 获取下载链接
-                download_url =  first_download_btn.get_attribute('data-url')
+                download_url = first_download_btn.get_attribute('data-url')
 
                 # 获取文件名
-                filename =  first_download_btn.get_attribute('download')
+                filename = first_download_btn.get_attribute('download')
                 if not filename:
                     # 如果没有download属性，则获取按钮的文本内容
                     filename = await first_download_btn.text
@@ -177,7 +177,7 @@ class EnhancedHanime1Scraper:
                     # 检查元素类型，确定是否需要await
                     if hasattr(element, 'get_attribute') and callable(getattr(element, 'get_attribute')):
                         # 元素是异步对象，需要await
-                        href =  element.get_attribute('href')
+                        href = element.get_attribute('href')
                     else:
                         # 元素已经是字符串，直接使用
                         href = element.get_attribute('href')
@@ -191,6 +191,7 @@ class EnhancedHanime1Scraper:
         """处理单个视频链接，提取下载链接"""
         print(f"处理链接: {video_url}")
 
+        # 使用独立的Chrome实例处理每个链接
         async with Chrome() as browser:
             tab = await browser.start()
 
@@ -203,7 +204,7 @@ class EnhancedHanime1Scraper:
                 if download_btn:
                     # 同样处理download_btn的get_attribute调用
                     if hasattr(download_btn, 'get_attribute') and callable(getattr(download_btn, 'get_attribute')):
-                        download_href =  download_btn.get_attribute('href')
+                        download_href = download_btn.get_attribute('href')
                     else:
                         download_href = download_btn.get_attribute('href')
 
@@ -220,6 +221,12 @@ class EnhancedHanime1Scraper:
 
             except Exception as e:
                 print(f"处理链接 {video_url} 时出错: {e}")
+            finally:
+                # 确保浏览器tab关闭
+                try:
+                    await tab.close()
+                except:
+                    pass
 
     async def process_links_batch(self, links_batch: List[str]) -> None:
         """批量处理链接"""
