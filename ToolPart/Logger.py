@@ -281,29 +281,28 @@ class TaskLogger:
             return None
 
     def remove_task(self, task_id: str) -> None:
-        """移除任务记录"""
+        """移除任务记录 - 修复：完全删除任务记录"""
         try:
             tasks = self._load_tasks()
             if task_id in tasks:
-                # 如果任务完成且没有失败视频，则完全删除
-                if tasks[task_id]["status"] == "completed" and not tasks[task_id]["failed_videos"]:
-                    self._remove_task_completely(tasks, task_id)
-                else:
-                    # 否则标记为失败
-                    tasks[task_id]["status"] = "failed"
-                    tasks[task_id]["updated_at"] = datetime.now().isoformat()
-                    self._save_tasks(tasks)
-
-                    # 清理该任务的视频进度数据
-                    for video_id in list(self.video_progress.keys()):
-                        video_info = self.get_video_info_by_id(task_id, video_id)
-                        if video_info:
-                            del self.video_progress[video_id]
-                            del self.video_status[video_id]
-                            if video_id in self.video_titles:
-                                del self.video_titles[video_id]
+                # 完全删除任务记录
+                self._remove_task_completely(tasks, task_id)
         except Exception as e:
             print(f"移除任务失败: {str(e)}")
+
+    def remove_all_tasks(self) -> None:
+        """移除所有任务记录"""
+        try:
+            # 清空视频进度数据
+            self.video_progress.clear()
+            self.video_status.clear()
+            self.video_titles.clear()
+
+            # 清空任务文件
+            tasks = {}
+            self._save_tasks(tasks)
+        except Exception as e:
+            print(f"移除所有任务失败: {str(e)}")
 
     def reset_task_for_retry(self, task_id: str) -> Dict[str, Any]:
         """重置任务状态用于重试"""

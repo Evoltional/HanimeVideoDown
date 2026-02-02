@@ -3,7 +3,6 @@ import random
 import re
 import threading
 import time
-
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Optional, List, Tuple, Dict
 import requests
@@ -76,19 +75,20 @@ class VideoDownloadThread(QThread):
         self.log_signal.emit(message)
 
     def pause(self) -> None:
-        """暂停下载任务"""
-        self.paused = True
-        self.log_message(f"下载任务已暂停: {self.list_url}")
+        """暂停下载任务 - 优化：使用线程安全的方式"""
+        with self.pause_cond:
+            self.paused = True
+            self.log_message(f"下载任务已暂停: {self.list_url}")
 
         # 更新任务状态
         if self.task_logger:
             self.task_logger.update_task_status(self.task_id, "paused")
 
     def resume(self) -> None:
-        """继续下载任务"""
+        """继续下载任务 - 优化：使用线程安全的方式"""
         with self.pause_cond:
             self.paused = False
-            self.pause_cond.notify()
+            self.pause_cond.notify_all()
         self.log_message(f"下载任务已继续: {self.list_url}")
 
         # 更新任务状态
@@ -108,10 +108,12 @@ class VideoDownloadThread(QThread):
             self.task_logger.update_task_status(self.task_id, "paused")
 
     def wait_if_paused(self) -> None:
-        """如果任务被暂停，则等待直到继续"""
+        """如果任务被暂停，则等待直到继续 - 优化：使用条件变量"""
         with self.pause_cond:
             while self.paused and self.running:
-                self.pause_cond.wait()
+                self.pause_cond.wait(0.5)  # 每0.5秒检查一次
+                if not self.running:
+                    break
 
     def handle_browser_navigation(self, browser, url: str, page_type: str = "list") -> bool:
         """处理浏览器导航，包括turnstile验证"""

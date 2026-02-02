@@ -1036,53 +1036,63 @@ class HanimeDownloaderApp(QMainWindow):
         task_id = task_frame.objectName()
 
         # 停止活动线程中的任务
+        thread_to_remove = None
         for thread in self.active_threads:
             if hasattr(thread, 'task_frame') and thread.task_frame == task_frame:
-                thread.stop()
-                if thread.isRunning():
-                    thread.wait(5000)  # 等待线程停止
-                self.log_message(f"任务已删除: {thread.list_url}")
+                thread_to_remove = thread
+                break
 
-                # 删除任务记录
-                task_id = thread.task_id
+        if thread_to_remove:
+            thread_to_remove.stop()
+            if thread_to_remove.isRunning():
+                thread_to_remove.wait(5000)  # 等待线程停止
+            self.log_message(f"任务已删除: {thread_to_remove.list_url}")
+
+            # 删除任务记录
+            if self.task_logger:
                 self.task_logger.remove_task(task_id)
 
-                if thread in self.active_threads:
-                    self.active_threads.remove(thread)
-                if task_frame and task_frame.parent():
-                    task_frame.deleteLater()
+            if thread_to_remove in self.active_threads:
+                self.active_threads.remove(thread_to_remove)
+            if task_frame and task_frame.parent():
+                task_frame.deleteLater()
 
-                # 从pending_tasks中移除
-                self.pending_tasks = [t for t in self.pending_tasks if t["frame"] != task_frame]
+            # 从pending_tasks中移除
+            self.pending_tasks = [t for t in self.pending_tasks if t["frame"] != task_frame]
 
-                # 清除该任务的视频进度显示
-                for video_url in list(self.video_progress_widgets.keys()):
-                    if video_url in self.task_videos.get(task_id, []):
-                        self.remove_video_progress(video_url)
+            # 清除该任务的视频进度显示
+            for video_url in list(self.video_progress_widgets.keys()):
+                if video_url in self.task_videos.get(task_id, []):
+                    self.remove_video_progress(video_url)
 
-                self.start_next_task()
-                return
+            self.start_next_task()
+            return
 
         # 删除等待队列中的任务
+        task_to_remove = None
         for task in self.pending_tasks:
             if task["frame"] == task_frame:
-                self.pending_tasks.remove(task)
-                self.log_message(f"已从队列中删除任务: {task['url']}")
+                task_to_remove = task
+                break
 
-                # 删除任务记录
-                task_id = task["task_id"]
-                self.task_logger.remove_task(task_id)
+        if task_to_remove:
+            self.pending_tasks.remove(task_to_remove)
+            self.log_message(f"已从队列中删除任务: {task_to_remove['url']}")
 
-                if task_frame and task_frame.parent():
-                    task_frame.deleteLater()
+            # 删除任务记录
+            if self.task_logger:
+                self.task_logger.remove_task(task_to_remove["task_id"])
 
-                # 清除该任务的视频进度显示
-                for video_url in list(self.video_progress_widgets.keys()):
-                    if video_url in self.task_videos.get(task_id, []):
-                        self.remove_video_progress(video_url)
+            if task_frame and task_frame.parent():
+                task_frame.deleteLater()
 
-                self.update_queue_status()
-                return
+            # 清除该任务的视频进度显示
+            for video_url in list(self.video_progress_widgets.keys()):
+                if video_url in self.task_videos.get(task_to_remove["task_id"], []):
+                    self.remove_video_progress(video_url)
+
+            self.update_queue_status()
+            return
 
     def pause_all_tasks(self) -> None:
         """暂停所有任务"""
@@ -1109,7 +1119,8 @@ class HanimeDownloaderApp(QMainWindow):
             if task.get("status") != "paused":
                 task["status"] = "paused"
                 update_task_status(task["frame"], "已暂停", "#f39c12")
-                self.task_logger.update_task_status(task["task_id"], "paused")
+                if self.task_logger:
+                    self.task_logger.update_task_status(task["task_id"], "paused")
 
         self.log_message("已暂停所有下载任务")
 
@@ -1138,7 +1149,8 @@ class HanimeDownloaderApp(QMainWindow):
             if task.get("status") == "paused":
                 task["status"] = "running"
                 update_task_status(task["frame"], "运行中", "#2ecc71")
-                self.task_logger.update_task_status(task["task_id"], "running")
+                if self.task_logger:
+                    self.task_logger.update_task_status(task["task_id"], "running")
 
         self.log_message("已继续所有下载任务")
 
@@ -1162,10 +1174,6 @@ class HanimeDownloaderApp(QMainWindow):
                     thread.stop()
                     thread.wait(5000)  # 等待5秒让线程停止
                 self.log_message(f"已删除任务: {thread.list_url}")
-
-                # 删除任务记录
-                task_id = thread.task_id
-                self.task_logger.remove_task(task_id)
             except Exception as e:
                 self.log_message(f"删除任务时出错: {str(e)}")
 
@@ -1173,10 +1181,6 @@ class HanimeDownloaderApp(QMainWindow):
         for task in self.pending_tasks[:]:  # 使用副本遍历
             try:
                 self.log_message(f"已删除任务: {task['url']}")
-
-                # 删除任务记录
-                task_id = task["task_id"]
-                self.task_logger.remove_task(task_id)
 
                 # 删除任务框
                 if task["frame"] and task["frame"].parent():
@@ -1186,6 +1190,10 @@ class HanimeDownloaderApp(QMainWindow):
 
         # 清除所有视频进度显示
         self.clear_all_video_progress()
+
+        # 删除所有任务记录
+        if self.task_logger:
+            self.task_logger.remove_all_tasks()
 
         # 清除所有列表
         self.active_threads.clear()
