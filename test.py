@@ -4,21 +4,47 @@ from typing import List, Optional, Tuple
 from urllib.parse import unquote
 
 import requests
-from pydoll.browser import Chrome
+from pydoll.browser.chromium import Chrome
+from pydoll.browser.options import ChromiumOptions
+from pydoll.constants import PageLoadState
 
 
 class VideoDownloader:
-    def __init__(self, download_dir="./downloads", max_retries=3):
+    def __init__(self, download_dir="./downloads", max_retries=3, headless=True):
         self.download_dir = download_dir
         self.max_retries = max_retries
+        self.headless = headless
         # 创建下载目录
         os.makedirs(download_dir, exist_ok=True)
+
+    def _create_chrome_options(self) -> ChromiumOptions:
+        """创建Chrome配置选项"""
+        options = ChromiumOptions()
+
+        # 基本配置
+        options.headless = self.headless
+        options.start_timeout = 15
+        options.page_load_state = PageLoadState.INTERACTIVE
+
+        # 添加命令行参数
+        options.add_argument('--disable-gpu')
+        options.add_argument('--window-size=1920,1080')
+        options.add_argument('--no-sandbox')
+        options.add_argument('--disable-dev-shm-usage')
+
+        # 常见设置的辅助方法
+        options.block_notifications = True
+        options.block_popups = True
+        options.set_default_download_directory(self.download_dir)
+
+        return options
 
     async def extract_download_info(self, download_page_url: str) -> Tuple[Optional[str], Optional[str]]:
         """
         从下载页面提取视频下载链接和文件名
         """
-        async with Chrome() as browser:
+        options = self._create_chrome_options()
+        async with Chrome(options=options) as browser:
             tab = await browser.start()
 
             print(f"访问下载页面: {download_page_url}")
@@ -156,15 +182,38 @@ class VideoDownloader:
 
 
 class EnhancedHanime1Scraper:
-    def __init__(self, max_workers=5):
+    def __init__(self, max_workers=5, headless=True):
         self.all_video_links = set()
         self.download_links = []
-        self.downloader = VideoDownloader()
+        self.downloader = VideoDownloader(headless=headless)
         self.max_workers = max_workers
+
+    def _create_chrome_options(self) -> ChromiumOptions:
+        """创建Chrome配置选项"""
+        options = ChromiumOptions()
+
+        # 基本配置
+        options.headless = True  # 默认启用无头模式
+        options.start_timeout = 15
+        options.page_load_state = PageLoadState.INTERACTIVE
+
+        # 添加命令行参数
+        options.add_argument('--disable-gpu')
+        options.add_argument('--window-size=1920,1080')
+        options.add_argument('--no-sandbox')
+        options.add_argument('--disable-dev-shm-usage')
+
+        # 常见设置的辅助方法
+        options.block_notifications = True
+        options.block_popups = True
+        options.set_default_download_directory(self.downloader.download_dir)
+
+        return options
 
     async def get_video_links(self, start_url: str) -> List[str]:
         """获取所有视频链接"""
-        async with Chrome() as browser:
+        options = self._create_chrome_options()
+        async with Chrome(options=options) as browser:
             tab = await browser.start()
 
             await tab.go_to(start_url)
@@ -192,7 +241,8 @@ class EnhancedHanime1Scraper:
         print(f"处理链接: {video_url}")
 
         # 使用独立的Chrome实例处理每个链接
-        async with Chrome() as browser:
+        options = self._create_chrome_options()
+        async with Chrome(options=options) as browser:
             tab = await browser.start()
 
             try:
@@ -241,7 +291,7 @@ class EnhancedHanime1Scraper:
 
 
 async def main():
-    scraper = EnhancedHanime1Scraper(max_workers=3)  # 限制并发浏览器数量
+    scraper = EnhancedHanime1Scraper(max_workers=3, headless=True)  # 限制并发浏览器数量
     video_links = await scraper.get_video_links('https://hanime1.me/watch?v=22602')
 
     if not video_links:
