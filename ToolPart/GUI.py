@@ -14,6 +14,35 @@ from ToolPart.Config import ConfigManager
 from ToolPart.TaskLogger import TaskLogger
 
 
+def _update_task_ui_status(task_frame, status_text, status_color,
+                           pause_enabled=True, pause_style="",
+                           resume_enabled=False, resume_style=""):
+    """更新任务UI状态的通用方法"""
+    # 更新状态标签
+    status_label = task_frame.findChild(QLabel, "status_label")
+    if status_label:
+        status_label.setText(status_text)
+        status_label.setStyleSheet(f"color: {status_color};")
+
+    # 更新暂停按钮
+    pause_btn = task_frame.findChild(QPushButton, "pause_btn")
+    if pause_btn:
+        pause_btn.setEnabled(pause_enabled)
+        if pause_style:
+            pause_btn.setStyleSheet(pause_style)
+        else:
+            pause_btn.setStyleSheet("")
+
+    # 更新继续按钮
+    resume_btn = task_frame.findChild(QPushButton, "resume_btn")
+    if resume_btn:
+        resume_btn.setEnabled(resume_enabled)
+        if resume_style:
+            resume_btn.setStyleSheet(resume_style)
+        else:
+            resume_btn.setStyleSheet("")
+
+
 class TaskManager:
     """任务管理器，控制并发数量"""
 
@@ -286,23 +315,16 @@ class TaskManager:
             if self.task_logger:
                 self.task_logger.update_task_status(task_info['task_id'], 'running')
 
-            # 更新任务状态显示
-            status_label = task_info['task_frame'].findChild(QLabel, "status_label")
-            if status_label:
-                status_label.setText("状态: 运行中")
-                status_label.setStyleSheet("color: #2ecc71;")
-
-            # 更新暂停按钮状态
-            pause_btn = task_info['task_frame'].findChild(QPushButton, "pause_btn")
-            if pause_btn:
-                pause_btn.setEnabled(True)
-                pause_btn.setStyleSheet("background-color: #3498db;")
-
-            # 禁用继续按钮
-            resume_btn = task_info['task_frame'].findChild(QPushButton, "resume_btn")
-            if resume_btn:
-                resume_btn.setEnabled(False)
-                resume_btn.setStyleSheet("background-color: #7f8c8d;")
+            # 更新任务UI状态
+            _update_task_ui_status(
+                task_info['task_frame'],
+                "状态: 运行中",
+                "#2ecc71",
+                pause_enabled=True,
+                pause_style="background-color: #3498db;",
+                resume_enabled=False,
+                resume_style="background-color: #7f8c8d;"
+            )
 
             # 将任务从暂停队列移到活跃队列
             if task_info in self.paused_tasks:
