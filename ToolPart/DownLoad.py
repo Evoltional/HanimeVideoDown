@@ -63,10 +63,15 @@ class VideoDownloader:
         """创建Chrome配置选项"""
         return create_chrome_options(self.headless, self.download_dir)
 
-    async def extract_download_info(self, download_page_url: str) -> Tuple[Optional[str], Optional[str]]:
+    async def extract_download_info(self, download_page_url: str, worker=None) -> Tuple[Optional[str], Optional[str]]:
         """
         从下载页面提取视频下载链接和文件名
         """
+        # 在进入浏览器操作前检查暂停状态
+        if worker and hasattr(worker, 'should_pause') and worker.should_pause():
+            print("浏览器操作被暂停")
+            return None, None
+            
         options = self._create_chrome_options()
         async with Chrome(options=options) as browser:
             tab = await browser.start()
@@ -74,8 +79,18 @@ class VideoDownloader:
             print(f"访问下载页面: {download_page_url}")
             await tab.go_to(download_page_url)
             await asyncio.sleep(5)  # 等待页面完全加载
+            
+            # 页面加载后再次检查暂停状态
+            if worker and hasattr(worker, 'should_pause') and worker.should_pause():
+                print("页面加载后检测到暂停指令")
+                return None, None
 
             try:
+                # 在查找元素前检查暂停状态
+                if worker and hasattr(worker, 'should_pause') and worker.should_pause():
+                    print("元素查找前检测到暂停指令")
+                    return None, None
+                    
                 # 查找下载链接列表表格
                 table_element = await tab.query('//*[@id="content-div"]/div[1]/div[4]/div/div/table',
                                                 timeout=10, raise_exc=False)
@@ -85,6 +100,11 @@ class VideoDownloader:
                     return None, None
 
                 print("找到下载链接列表表格")
+                
+                # 在查找下载按钮前检查暂停状态
+                if worker and hasattr(worker, 'should_pause') and worker.should_pause():
+                    print("下载按钮查找前检测到暂停指令")
+                    return None, None
 
                 # 查找第一个下载按钮
                 first_download_btn = await tab.query(
@@ -269,19 +289,34 @@ class HanimeScraper:
         """创建Chrome配置选项"""
         return create_chrome_options(self.headless, self.downloader.download_dir)
 
-    async def get_video_links(self, start_url: str) -> List[str]:
+    async def get_video_links(self, start_url: str, worker=None) -> List[str]:
         """获取所有视频链接"""
+        # 在开始浏览器操作前检查暂停状态
+        if worker and hasattr(worker, 'should_pause') and worker.should_pause():
+            print("获取视频链接前检测到暂停指令")
+            return []
+            
         options = self._create_chrome_options()
         async with Chrome(options=options) as browser:
             tab = await browser.start()
 
             await tab.go_to(start_url)
             await asyncio.sleep(3)
+            
+            # 页面加载后检查暂停状态
+            if worker and hasattr(worker, 'should_pause') and worker.should_pause():
+                print("页面加载后检测到暂停指令")
+                return []
 
             overlay_elements = await tab.find(class_name='overlay', find_all=True, timeout=10, raise_exc=False)
 
             if overlay_elements:
                 for element in overlay_elements:
+                    # 在处理每个元素前检查暂停状态
+                    if worker and hasattr(worker, 'should_pause') and worker.should_pause():
+                        print("处理视频链接时检测到暂停指令")
+                        return list(self.all_video_links)
+                        
                     # 检查元素类型，确定是否需要await
                     if hasattr(element, 'get_attribute') and callable(getattr(element, 'get_attribute')):
                         # 元素是异步对象，需要await
@@ -450,7 +485,7 @@ class DownloadWorker(QThread):
         self._check_pause()
 
         # 获取视频链接
-        video_links = await scraper.get_video_links(self.url)
+        video_links = await scraper.get_video_links(self.url, self)
 
         # 再次检查暂停状态
         self._check_pause()
