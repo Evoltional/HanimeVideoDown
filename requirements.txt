@@ -1,0 +1,4 @@
+pyqt5~=5.15.9
+asyncio~=3.4.3
+requests~=2.32.4
+pydoll-python
