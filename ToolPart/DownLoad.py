@@ -1,30 +1,54 @@
 import asyncio
 import os
-import time
+import queue
 import threading
-import atexit
+import time
 from typing import List, Optional, Tuple
 from urllib.parse import unquote
 
 import requests
+from PyQt5.QtCore import QThread, pyqtSignal
 from pydoll.browser.chromium import Chrome
 from pydoll.browser.options import ChromiumOptions
 from pydoll.constants import PageLoadState
-from PyQt5.QtCore import QThread, pyqtSignal
-import queue
 
-# 注册程序退出时的清理函数
-atexit.register(lambda: cleanup_chrome_temp_files())
 
-def cleanup_chrome_temp_files():
-    """清理Chrome临时文件，减少退出时的错误"""
-    try:
-        # 这个函数会在程序正常退出时被调用
-        # 主要目的是减少临时文件清理时的权限错误
-        pass
-    except:
-        # 忽略所有清理错误
-        pass
+def create_chrome_options(headless: bool = True, download_dir: str = "./downloads") -> ChromiumOptions:
+    """创建Chrome配置选项的通用函数"""
+    options = ChromiumOptions()
+
+    # 基本配置
+    options.headless = headless
+    options.start_timeout = 15
+    options.page_load_state = PageLoadState.INTERACTIVE
+
+    # 添加命令行参数
+    options.add_argument('--disable-gpu')
+    options.add_argument('--window-size=1920,1080')
+    options.add_argument('--no-sandbox')
+    options.add_argument('--disable-dev-shm-usage')
+
+    # 常见设置的辅助方法
+    options.block_notifications = True
+    options.block_popups = True
+    options.set_default_download_directory(download_dir)
+
+    return options
+
+
+def _sanitize_filename(filename: str) -> str:
+    """
+    清理文件名，移除非法字符
+    """
+    # 替换Windows/Linux不支持的字符
+    invalid_chars = '<>:"/\\|?*'
+    for char in invalid_chars:
+        filename = filename.replace(char, '_')
+
+    # 解码URL编码的字符（如果有）
+    filename = unquote(filename)
+
+    return filename
 
 
 class VideoDownloader:
@@ -37,25 +61,7 @@ class VideoDownloader:
 
     def _create_chrome_options(self) -> ChromiumOptions:
         """创建Chrome配置选项"""
-        options = ChromiumOptions()
-
-        # 基本配置
-        options.headless = self.headless
-        options.start_timeout = 15
-        options.page_load_state = PageLoadState.INTERACTIVE
-
-        # 添加命令行参数
-        options.add_argument('--disable-gpu')
-        options.add_argument('--window-size=1920,1080')
-        options.add_argument('--no-sandbox')
-        options.add_argument('--disable-dev-shm-usage')
-
-        # 常见设置的辅助方法
-        options.block_notifications = True
-        options.block_popups = True
-        options.set_default_download_directory(self.download_dir)
-
-        return options
+        return create_chrome_options(self.headless, self.download_dir)
 
     async def extract_download_info(self, download_page_url: str) -> Tuple[Optional[str], Optional[str]]:
         """
@@ -126,7 +132,7 @@ class VideoDownloader:
             return False
 
         # 清理文件名，移除非法字符
-        safe_filename = self._sanitize_filename(filename)
+        safe_filename = _sanitize_filename(filename)
         
         # 添加下载中前缀
         downloading_filename = f"下载中_{safe_filename}"
@@ -173,11 +179,13 @@ class VideoDownloader:
                     for chunk in response.iter_content(chunk_size=8192):
                         if chunk:
                             # 检查是否需要暂停
-                            if worker:
-                                worker._check_pause()
+                            if worker and hasattr(worker, 'should_pause') and worker.should_pause():
+                                print("\n下载已被暂停")
+                                # 保留下载中的文件，不删除
+                                return False
 
                             # 检查是否停止
-                            if worker and not worker._is_running:
+                            if worker and hasattr(worker, 'is_running') and not worker.is_running():
                                 print("\n下载已被停止")
                                 # 保留下载中的文件，不删除
                                 return False
@@ -191,8 +199,9 @@ class VideoDownloader:
                                 print(f"\r下载进度: {progress:.1f}% ({downloaded_size}/{total_size} bytes)", end='')
 
                                 # 每次更新进度时也检查暂停状态，提高响应速度
-                                if worker:
-                                    worker._check_pause()
+                                if worker and hasattr(worker, 'should_pause') and worker.should_pause():
+                                    print("\n下载已被暂停")
+                                    return False
 
                 print(f"\n下载完成，正在重命名文件...")
                 
@@ -224,20 +233,6 @@ class VideoDownloader:
 
         return False
 
-    def _sanitize_filename(self, filename: str) -> str:
-        """
-        清理文件名，移除非法字符
-        """
-        # 替换Windows/Linux不支持的字符
-        invalid_chars = '<>:"/\\|?*'
-        for char in invalid_chars:
-            filename = filename.replace(char, '_')
-
-        # 解码URL编码的字符（如果有）
-        filename = unquote(filename)
-
-        return filename
-
     async def download_from_page(self, download_page_url: str, worker=None, task_logger=None, task_id=None) -> bool:
         """
         从下载页面获取信息并下载视频
@@ -254,7 +249,7 @@ class VideoDownloader:
             return False
 
 
-class EnhancedHanime1Scraper:
+class HanimeScraper:
     def __init__(self, max_workers=2, headless=True, download_dir="./downloads", task_logger=None, task_id=None):
         self.all_video_links = set()
         self.download_links = []
@@ -272,25 +267,7 @@ class EnhancedHanime1Scraper:
 
     def _create_chrome_options(self) -> ChromiumOptions:
         """创建Chrome配置选项"""
-        options = ChromiumOptions()
-
-        # 基本配置 - 使用实例的headless参数
-        options.headless = self.headless
-        options.start_timeout = 15
-        options.page_load_state = PageLoadState.INTERACTIVE
-
-        # 添加命令行参数
-        options.add_argument('--disable-gpu')
-        options.add_argument('--window-size=1920,1080')
-        options.add_argument('--no-sandbox')
-        options.add_argument('--disable-dev-shm-usage')
-
-        # 常见设置的辅助方法
-        options.block_notifications = True
-        options.block_popups = True
-        options.set_default_download_directory(self.downloader.download_dir)
-
-        return options
+        return create_chrome_options(self.headless, self.downloader.download_dir)
 
     async def get_video_links(self, start_url: str) -> List[str]:
         """获取所有视频链接"""
@@ -446,7 +423,7 @@ class DownloadWorker(QThread):
             self.log_signal.emit(f"开始处理链接: {self.url}")
 
             # 创建scraper实例并设置参数
-            scraper = EnhancedHanime1Scraper(
+            scraper = HanimeScraper(
                 max_workers=2,  # 使用2个线程处理视频链接
                 headless=self.headless,
                 download_dir=self.download_dir,
@@ -463,7 +440,7 @@ class DownloadWorker(QThread):
             self.log_signal.emit(f"下载任务出错: {str(e)}")
             self.finished_signal.emit(False)
 
-    async def _process_link(self, scraper: EnhancedHanime1Scraper):
+    async def _process_link(self, scraper: HanimeScraper):
         """异步处理单个链接"""
         # 检查是否被停止
         if not self._is_running:
@@ -505,8 +482,20 @@ class DownloadWorker(QThread):
         with self._pause_condition:
             self._pause_condition.notify_all()
 
+    def should_pause(self) -> bool:
+        """检查是否应该暂停"""
+        if self._is_paused and self._is_running:
+            with self._pause_condition:
+                self._pause_condition.wait(0.1)  # 等待0.1秒后重新检查
+            return True
+        return False
+    
+    def is_running(self) -> bool:
+        """检查任务是否仍在运行"""
+        return self._is_running
+    
     def _check_pause(self):
-        """检查是否需要暂停"""
+        """检查是否需要暂停（内部使用）"""
         while self._is_paused and self._is_running:
             with self._pause_condition:
                 self._pause_condition.wait(0.1)  # 等待0.1秒后重新检查

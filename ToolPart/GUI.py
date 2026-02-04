@@ -379,6 +379,17 @@ class MainWindow(QMainWindow):
         super().__init__()
 
         # 初始化配置管理器
+        self.status_bar = None
+        self.log_area = None
+        self.tasks_container = None
+        self.tasks_layout = None
+        self.tasks_scroll = None
+        self.clear_all_btn = None
+        self.pause_btn = None
+        self.download_btn = None
+        self.headless_checkbox = None
+        self.url_input = None
+        self.download_path_label = None
         self.config_manager = ConfigManager()
 
         # 初始化TaskLogger

@@ -121,15 +121,6 @@ class TaskLogger:
             print(f"扫描下载目录时出错: {e}")
         
         return downloading_files
-    
-    def update_task_status(self, task_id: str, status: str) -> None:
-        """更新任务状态"""
-        with self.lock:
-            tasks = self._load_tasks()
-            if task_id in tasks:
-                tasks[task_id]["status"] = status
-                tasks[task_id]["updated_at"] = datetime.now().isoformat()
-                self._save_tasks(tasks)
 
     def clear_all_tasks(self) -> None:
         """清空所有任务"""
