@@ -249,7 +249,7 @@ class TaskManager:
                     self._try_start_pending_tasks()
                 except Exception as e:
                     print(f"尝试启动待处理任务时出错: {e}")
-                    
+
         except Exception as e:
             print(f"删除任务时发生未知错误: {e}")
 
@@ -257,12 +257,12 @@ class TaskManager:
         """暂停所有任务"""
         # 收集所有需要暂停的任务
         tasks_to_pause = []
-        
+
         # 先收集所有活跃任务
         for task_info in self.active_tasks[:]:  # 使用副本避免修改时出现问题
             if task_info['status'] == 'active':
                 tasks_to_pause.append(task_info)
-        
+
         # 暂停所有收集到的任务
         for task_info in tasks_to_pause:
             task_info['worker'].pause()
@@ -300,12 +300,12 @@ class TaskManager:
         """恢复所有暂停的任务"""
         # 收集所有需要恢复的任务
         tasks_to_resume = []
-        
+
         # 先收集所有暂停任务
         for task_info in self.paused_tasks[:]:  # 使用副本避免修改时出现问题
             if task_info['status'] == 'paused':
                 tasks_to_resume.append(task_info)
-        
+
         # 恢复所有收集到的任务
         for task_info in tasks_to_resume:
             task_info['worker'].resume()
@@ -329,7 +329,7 @@ class TaskManager:
             # 将任务从暂停队列移到活跃队列
             if task_info in self.paused_tasks:
                 self.paused_tasks.remove(task_info)
-            
+
             # 只有当活跃任务数小于最大限制时才真正开始
             if len(self.active_tasks) < self.max_active_tasks:
                 self.active_tasks.append(task_info)
@@ -346,8 +346,9 @@ class TaskManager:
 
     def stop_all_tasks(self):
         """停止所有任务（包括未完成的）"""
-        print(f"停止所有任务 - 活跃: {len(self.active_tasks)}, 待处理: {len(self.pending_tasks)}, 暂停: {len(self.paused_tasks)}")
-        
+        print(
+            f"停止所有任务 - 活跃: {len(self.active_tasks)}, 待处理: {len(self.pending_tasks)}, 暂停: {len(self.paused_tasks)}")
+
         # 停止所有活跃任务
         for task_info in self.active_tasks[:]:  # 使用副本避免迭代时修改
             print(f"停止活跃任务: {task_info['task_id']}")
@@ -391,7 +392,7 @@ class TaskManager:
                 self.task_info_map.clear()
             except Exception as e:
                 print(f"清空任务列表时出错: {e}")
-                
+
         except Exception as e:
             print(f"清空所有任务时发生未知错误: {e}")
 
@@ -627,7 +628,7 @@ class MainWindow(QMainWindow):
         self.download_btn.clicked.connect(self.start_download)
         button_layout.addWidget(self.download_btn)
 
-        self.pause_btn = QPushButton("暂停下载")
+        self.pause_btn = QPushButton("暂停全部")
         self.pause_btn.clicked.connect(self.pause_download)
         button_layout.addWidget(self.pause_btn)
 
@@ -780,12 +781,12 @@ class MainWindow(QMainWindow):
                 if resume_btn:
                     resume_btn.setEnabled(True)
                     resume_btn.setStyleSheet("")
-                
+
                 pause_btn = task_info['task_frame'].findChild(QPushButton, "pause_btn")
                 if pause_btn:
                     pause_btn.setEnabled(False)
                     pause_btn.setStyleSheet("background-color: #7f8c8d;")
-                
+
                 # 将任务状态设置为暂停，允许用户重新开始
                 task_info['status'] = 'paused'
 
@@ -804,8 +805,11 @@ class MainWindow(QMainWindow):
 
     def pause_download(self) -> None:
         """暂停所有下载任务"""
-        self.task_manager.pause_all_tasks()
-        self.log_message("已暂停所有下载任务")
+        if self.task_manager.active_tasks:
+            self.task_manager.pause_all_tasks()
+            self.log_message("已暂停所有下载任务")
+        else:
+            self.log_message("没有正在运行的任务可以暂停")
 
     def resume_all_tasks(self) -> None:
         """恢复所有任务"""
@@ -821,7 +825,7 @@ class MainWindow(QMainWindow):
         try:
             # 停止所有正在运行的任务
             self.task_manager.clear_all_tasks()
-            
+
             # 清空UI中的任务显示
             try:
                 while self.tasks_layout.count():
@@ -830,7 +834,7 @@ class MainWindow(QMainWindow):
                         child.widget().deleteLater()
             except Exception as e:
                 print(f"清空UI任务显示时出错: {e}")
-                
+
             self.log_message("已清空所有任务")
         except Exception as e:
             print(f"清空所有任务时出错: {e}")
@@ -913,7 +917,7 @@ class MainWindow(QMainWindow):
             except Exception as e:
                 print(f"从任务管理器移除任务时出错: {e}")
                 self.log_message(f"删除任务时出错: {str(e)}")
-                
+
         except Exception as e:
             print(f"删除任务时发生未知错误: {e}")
             self.log_message(f"删除任务失败: {str(e)}")
@@ -937,7 +941,7 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):
         """窗口关闭事件，保存窗口位置和大小"""
         print("程序正在关闭...")
-        
+
         # 获取当前窗口的位置和大小
         pos = self.pos()
         size = self.size()
@@ -954,7 +958,7 @@ class MainWindow(QMainWindow):
         if hasattr(self, 'task_manager'):
             print("正在停止所有下载任务...")
             self.task_manager.stop_all_tasks()
-            
+
             # 等待一小段时间让任务停止
             import time
             time.sleep(1)
