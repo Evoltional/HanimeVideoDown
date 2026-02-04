@@ -2,9 +2,8 @@ import json
 import os
 import threading
 import time
-from typing import Dict, List, Optional, Any
 from datetime import datetime
-import shutil
+from typing import Dict, List, Any
 
 
 class TaskLogger:
@@ -199,6 +198,51 @@ class TaskLogger:
                                 print(f"  删除文件失败 {filename}: {e}")
                 except Exception as e:
                     print(f"检查目录 {dir_path} 时出错: {e}")
+
+    def _cleanup_incomplete_videos(self, task_info: Dict[str, Any]) -> None:
+        """清理未完成任务的视频文件"""
+        try:
+            download_dir = task_info.get("download_dir", "./Download")
+            downloaded_videos = task_info.get("downloaded_videos", [])
+            video_links = task_info.get("video_links", [])
+            
+            print(f"清理目录 {download_dir} 中的未完成文件")
+            
+            if not os.path.exists(download_dir):
+                print(f"下载目录不存在: {download_dir}")
+                return
+                
+            # 删除已下载但未完成的视频文件
+            for video_filename in downloaded_videos:
+                file_path = os.path.join(download_dir, video_filename)
+                if os.path.exists(file_path):
+                    try:
+                        os.remove(file_path)
+                        print(f"已删除未完成视频文件: {file_path}")
+                    except PermissionError:
+                        print(f"文件被占用，无法删除: {file_path}")
+                    except Exception as e:
+                        print(f"删除文件 {file_path} 失败: {e}")
+                else:
+                    print(f"文件不存在: {file_path}")
+                        
+            # 删除下载中的临时文件
+            downloading_files = self.get_downloading_files(download_dir)
+            for filename in downloading_files:
+                file_path = os.path.join(download_dir, filename)
+                try:
+                    if os.path.exists(file_path):
+                        os.remove(file_path)
+                        print(f"已删除下载中文件: {file_path}")
+                    else:
+                        print(f"下载中文件不存在: {file_path}")
+                except PermissionError:
+                    print(f"下载中文件被占用，无法删除: {file_path}")
+                except Exception as e:
+                    print(f"删除下载中文件 {file_path} 失败: {e}")
+                    
+        except Exception as e:
+            print(f"清理未完成视频文件时出错: {e}")
 
     # 文件清理功能已移除，现在使用文件名前缀方式标识下载状态
 

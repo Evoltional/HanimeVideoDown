@@ -262,6 +262,7 @@ class EnhancedHanime1Scraper:
         self.max_workers = max_workers
         self.task_logger = task_logger
         self.task_id = task_id
+        self.headless = headless  # 保存headless参数
 
         # 多线程处理队列
         self.link_queue = queue.Queue()
@@ -273,8 +274,8 @@ class EnhancedHanime1Scraper:
         """创建Chrome配置选项"""
         options = ChromiumOptions()
 
-        # 基本配置
-        options.headless = True  # 默认启用无头模式
+        # 基本配置 - 使用实例的headless参数
+        options.headless = self.headless
         options.start_timeout = 15
         options.page_load_state = PageLoadState.INTERACTIVE
 

@@ -11,7 +11,7 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QH
 
 from ToolPart.DownLoad import DownloadWorker
 from ToolPart.Config import ConfigManager
-from TaskLogger import TaskLogger  # 新增导入
+from ToolPart.TaskLogger import TaskLogger
 
 
 class TaskManager:
@@ -171,36 +171,58 @@ class TaskManager:
 
     def remove_task(self, worker):
         """删除指定任务"""
-        # 通过worker找到task_id
-        task_id = None
-        for tid, task_info in self.task_info_map.items():
-            if task_info['worker'] == worker:
-                task_id = tid
-                break
+        try:
+            # 通过worker找到task_id
+            task_id = None
+            for tid, task_info in self.task_info_map.items():
+                if task_info['worker'] == worker:
+                    task_id = tid
+                    break
 
-        if task_id and task_id in self.task_info_map:
-            task_info = self.task_info_map[task_id]
+            if task_id and task_id in self.task_info_map:
+                task_info = self.task_info_map[task_id]
 
-            # 停止任务
-            task_info['worker'].stop()
+                # 停止任务
+                try:
+                    task_info['worker'].stop()
+                    # 等待线程停止
+                    if task_info['worker'].isRunning():
+                        task_info['worker'].wait(3000)  # 等待最多3秒
+                except Exception as e:
+                    print(f"停止任务线程时出错: {e}")
 
-            # 从TaskLogger中删除
-            if self.task_logger:
-                self.task_logger.remove_task(task_id)
+                # 从TaskLogger中删除
+                try:
+                    if self.task_logger:
+                        self.task_logger.remove_task(task_id)
+                except Exception as e:
+                    print(f"从TaskLogger删除任务时出错: {e}")
 
-            # 从各个列表中移除
-            if task_info in self.active_tasks:
-                self.active_tasks.remove(task_info)
-            elif task_info in self.pending_tasks:
-                self.pending_tasks.remove(task_info)
-            elif task_info in self.paused_tasks:
-                self.paused_tasks.remove(task_info)
+                # 从各个列表中移除
+                try:
+                    if task_info in self.active_tasks:
+                        self.active_tasks.remove(task_info)
+                    elif task_info in self.pending_tasks:
+                        self.pending_tasks.remove(task_info)
+                    elif task_info in self.paused_tasks:
+                        self.paused_tasks.remove(task_info)
+                except Exception as e:
+                    print(f"从任务列表移除时出错: {e}")
 
-            # 删除映射
-            del self.task_info_map[task_id]
+                # 删除映射
+                try:
+                    del self.task_info_map[task_id]
+                except Exception as e:
+                    print(f"删除任务映射时出错: {e}")
 
-            # 从暂停任务中恢复一个任务
-            self._try_start_pending_tasks()
+                # 从暂停任务中恢复一个任务
+                try:
+                    self._try_start_pending_tasks()
+                except Exception as e:
+                    print(f"尝试启动待处理任务时出错: {e}")
+                    
+        except Exception as e:
+            print(f"删除任务时发生未知错误: {e}")
 
     def pause_all_tasks(self):
         """暂停所有任务"""
@@ -328,18 +350,28 @@ class TaskManager:
 
     def clear_all_tasks(self):
         """清空所有任务"""
-        # 停止所有任务
-        self.stop_all_tasks()
+        try:
+            # 停止所有任务
+            self.stop_all_tasks()
 
-        # 清空TaskLogger中的所有任务
-        if self.task_logger:
-            self.task_logger.clear_all_tasks()
+            # 清空TaskLogger中的所有任务
+            try:
+                if self.task_logger:
+                    self.task_logger.clear_all_tasks()
+            except Exception as e:
+                print(f"清空TaskLogger时出错: {e}")
 
-        # 清空所有列表
-        self.active_tasks.clear()
-        self.pending_tasks.clear()
-        self.paused_tasks.clear()
-        self.task_info_map.clear()
+            # 清空所有列表
+            try:
+                self.active_tasks.clear()
+                self.pending_tasks.clear()
+                self.paused_tasks.clear()
+                self.task_info_map.clear()
+            except Exception as e:
+                print(f"清空任务列表时出错: {e}")
+                
+        except Exception as e:
+            print(f"清空所有任务时发生未知错误: {e}")
 
 
 class MainWindow(QMainWindow):
@@ -709,6 +741,21 @@ class MainWindow(QMainWindow):
                     status_label.setText("状态: 失败")
                     status_label.setStyleSheet("color: #e74c3c;")
 
+                # 下载失败后，任务应该可以重新开始
+                # 启用继续按钮，禁用暂停按钮
+                resume_btn = task_info['task_frame'].findChild(QPushButton, "resume_btn")
+                if resume_btn:
+                    resume_btn.setEnabled(True)
+                    resume_btn.setStyleSheet("")
+                
+                pause_btn = task_info['task_frame'].findChild(QPushButton, "pause_btn")
+                if pause_btn:
+                    pause_btn.setEnabled(False)
+                    pause_btn.setStyleSheet("background-color: #7f8c8d;")
+                
+                # 将任务状态设置为暂停，允许用户重新开始
+                task_info['status'] = 'paused'
+
             # 从任务管理器中移除已完成的任务
             # 注意：我们不从task_info_map中删除，因为用户可能还需要查看任务记录
             # 只是从活动任务列表中移除
@@ -738,14 +785,23 @@ class MainWindow(QMainWindow):
 
     def clear_all_tasks(self) -> None:
         """清空所有任务"""
-        # 停止所有正在运行的任务
-        self.task_manager.clear_all_tasks()
-        # 清空UI中的任务显示
-        while self.tasks_layout.count():
-            child = self.tasks_layout.takeAt(0)
-            if child.widget():
-                child.widget().deleteLater()
-        self.log_message("已清空所有任务")
+        try:
+            # 停止所有正在运行的任务
+            self.task_manager.clear_all_tasks()
+            
+            # 清空UI中的任务显示
+            try:
+                while self.tasks_layout.count():
+                    child = self.tasks_layout.takeAt(0)
+                    if child.widget():
+                        child.widget().deleteLater()
+            except Exception as e:
+                print(f"清空UI任务显示时出错: {e}")
+                
+            self.log_message("已清空所有任务")
+        except Exception as e:
+            print(f"清空所有任务时出错: {e}")
+            self.log_message(f"清空任务失败: {str(e)}")
 
     def create_task_frame(self, url: str, worker: DownloadWorker, is_resume: bool = False) -> QFrame:
         """创建任务显示框"""
@@ -809,13 +865,25 @@ class MainWindow(QMainWindow):
 
     def delete_task(self, task_frame: QFrame, worker: DownloadWorker):
         """删除特定任务"""
-        # 从UI中移除任务框架
-        self.tasks_layout.removeWidget(task_frame)
-        task_frame.deleteLater()
+        try:
+            # 从UI中移除任务框架
+            try:
+                self.tasks_layout.removeWidget(task_frame)
+                task_frame.deleteLater()
+            except Exception as e:
+                print(f"从UI移除任务框架时出错: {e}")
 
-        # 从任务管理器中移除
-        self.task_manager.remove_task(worker)
-        self.log_message(f"已删除任务")
+            # 从任务管理器中移除
+            try:
+                self.task_manager.remove_task(worker)
+                self.log_message(f"已删除任务")
+            except Exception as e:
+                print(f"从任务管理器移除任务时出错: {e}")
+                self.log_message(f"删除任务时出错: {str(e)}")
+                
+        except Exception as e:
+            print(f"删除任务时发生未知错误: {e}")
+            self.log_message(f"删除任务失败: {str(e)}")
 
     def change_download_path(self) -> None:
         """更改下载路径"""
