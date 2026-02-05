@@ -3,7 +3,7 @@ import sys
 import time
 import uuid
 
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtGui import QFont
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                              QLabel, QLineEdit, QPushButton, QTextEdit, QGroupBox,
@@ -417,6 +417,11 @@ class MainWindow(QMainWindow):
 
         # 初始化TaskLogger
         self.task_logger = TaskLogger()
+        
+        # 定时清理器
+        self.cleanup_timer = QTimer()
+        self.cleanup_timer.timeout.connect(self.periodic_cleanup)
+        self.cleanup_timer.start(300000)  # 每5分钟检查一次(300000毫秒)
 
         # 从配置中读取窗口位置和大小
         window_pos = self.config_manager.get("window_position", [100, 100])
@@ -762,6 +767,9 @@ class MainWindow(QMainWindow):
                 if status_label:
                     status_label.setText("状态: 已完成")
                     status_label.setStyleSheet("color: #2ecc71;")
+                
+                # 任务完成后自动清理 - 延迟执行以确保UI更新完成
+                QTimer.singleShot(2000, lambda: self.auto_cleanup_completed_task(task_id))
             else:
                 self.log_message(f"下载任务失败: {url}")
 
@@ -922,6 +930,73 @@ class MainWindow(QMainWindow):
             print(f"删除任务时发生未知错误: {e}")
             self.log_message(f"删除任务失败: {str(e)}")
 
+    def periodic_cleanup(self) -> None:
+        """定期清理超时的完成任务"""
+        try:
+            if self.task_logger:
+                self.task_logger.auto_cleanup_completed_tasks()
+        except Exception as e:
+            print(f"定期清理时出错: {e}")
+    
+    def auto_cleanup_completed_task(self, task_id: str) -> None:
+        """自动清理已完成的任务"""
+        try:
+            if task_id in self.task_manager.task_info_map:
+                task_info = self.task_manager.task_info_map[task_id]
+                url = task_info['url']
+                
+                self.log_message(f"正在自动清理已完成任务: {url}")
+                
+                # 停止任务线程
+                try:
+                    task_info['worker'].stop()
+                    if task_info['worker'].isRunning():
+                        task_info['worker'].wait(3000)  # 等待最多3秒
+                except Exception as e:
+                    print(f"停止任务线程时出错: {e}")
+                
+                # 从TaskLogger中删除任务记录
+                try:
+                    if self.task_manager.task_logger:
+                        self.task_manager.task_logger.remove_task(task_id)
+                except Exception as e:
+                    print(f"从TaskLogger删除任务时出错: {e}")
+                
+                # 从UI中移除任务显示
+                try:
+                    task_frame = task_info['task_frame']
+                    self.tasks_layout.removeWidget(task_frame)
+                    task_frame.deleteLater()
+                except Exception as e:
+                    print(f"从UI移除任务显示时出错: {e}")
+                
+                # 从任务管理器中彻底移除
+                try:
+                    # 从所有任务列表中移除
+                    if task_info in self.task_manager.active_tasks:
+                        self.task_manager.active_tasks.remove(task_info)
+                    if task_info in self.task_manager.pending_tasks:
+                        self.task_manager.pending_tasks.remove(task_info)
+                    if task_info in self.task_manager.paused_tasks:
+                        self.task_manager.paused_tasks.remove(task_info)
+                    
+                    # 从映射中删除
+                    del self.task_manager.task_info_map[task_id]
+                except Exception as e:
+                    print(f"从任务管理器移除时出错: {e}")
+                
+                # 尝试启动等待中的任务
+                try:
+                    self.task_manager._try_start_pending_tasks()
+                except Exception as e:
+                    print(f"尝试启动待处理任务时出错: {e}")
+                
+                self.log_message(f"已完成任务清理: {url}")
+                
+        except Exception as e:
+            print(f"自动清理任务时发生错误: {e}")
+            self.log_message(f"自动清理任务失败: {str(e)}")
+
     def change_download_path(self) -> None:
         """更改下载路径"""
         new_path = QFileDialog.getExistingDirectory(
@@ -941,6 +1016,11 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):
         """窗口关闭事件，保存窗口位置和大小"""
         print("程序正在关闭...")
+
+        # 停止定时清理器
+        if hasattr(self, 'cleanup_timer'):
+            self.cleanup_timer.stop()
+            print("已停止定时清理器")
 
         # 获取当前窗口的位置和大小
         pos = self.pos()
@@ -964,8 +1044,12 @@ class MainWindow(QMainWindow):
             time.sleep(1)
             print("任务已停止")
 
-        # 不再清理文件，保留所有下载状态
-        print("程序关闭完成，所有文件已保留")
+        # 执行最后的清理
+        if hasattr(self, 'task_logger'):
+            print("执行最后的清理...")
+            self.task_logger.cleanup_on_exit()
+
+        print("程序关闭完成")
         # 接受关闭事件
         event.accept()
 
