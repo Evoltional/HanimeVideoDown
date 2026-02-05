@@ -3,7 +3,7 @@ import sys
 import time
 import uuid
 
-from PyQt5.QtCore import Qt, QTimer
+from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QFont
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                              QLabel, QLineEdit, QPushButton, QTextEdit, QGroupBox,
@@ -553,9 +553,6 @@ class MainWindow(QMainWindow):
         # 初始化UI
         self.init_ui()
 
-        # 启动定时清理器
-        self.setup_periodic_cleanup()
-
         # 启动时恢复未完成的任务
         self.restore_incomplete_tasks()
 
@@ -961,126 +958,6 @@ class MainWindow(QMainWindow):
             print(f"删除任务时发生未知错误: {e}")
             self.log_message(f"删除任务失败: {str(e)}")
 
-    def periodic_cleanup(self) -> None:
-        """定期清理超时的完成任务"""
-        try:
-            self.log_message("执行定期清理任务...")
-            if self.task_logger:
-                self.task_logger.auto_cleanup_completed_tasks(days_old=1)  # 清理1天前完成的任务
-                self.log_message("定期清理完成")
-        except Exception as e:
-            print(f"定期清理时出错: {e}")
-            self.log_message(f"定期清理失败: {str(e)}")
-
-    def setup_periodic_cleanup(self):
-        """设置定时清理器"""
-        # 创建定时器，每30分钟检查一次
-        self.cleanup_timer = QTimer()
-        self.cleanup_timer.timeout.connect(self.periodic_cleanup)
-        self.cleanup_timer.start(30 * 60 * 1000)  # 30分钟 = 30*60*1000毫秒
-        
-        # 启动时也执行一次清理
-        QTimer.singleShot(5000, self.periodic_cleanup)  # 5秒后执行第一次清理
-    
-    def _schedule_auto_cleanup(self, task_id: str, task_info: dict) -> None:
-        """安排任务的自动清理"""
-        try:
-            delay_ms = self.task_manager.auto_cleanup_delay * 1000
-            self.log_message(f"任务将在 {self.task_manager.auto_cleanup_delay} 秒后自动清理: {task_info['url']}")
-            
-            # 使用QTimer延迟执行清理
-            cleanup_timer = QTimer()
-            cleanup_timer.setSingleShot(True)
-            cleanup_timer.timeout.connect(lambda: self._execute_auto_cleanup(task_id))
-            cleanup_timer.start(delay_ms)
-            
-            # 将timer存储到任务信息中，便于后续管理
-            task_info['_cleanup_timer'] = cleanup_timer
-            
-        except Exception as e:
-            self.log_message(f"安排自动清理失败: {str(e)}")
-
-    def _execute_auto_cleanup(self, task_id: str) -> None:
-        """执行任务的自动清理"""
-        try:
-            if task_id in self.task_manager.task_info_map:
-                task_info = self.task_manager.task_info_map[task_id]
-                url = task_info['url']
-                
-                self.log_message(f"正在自动清理已完成任务: {url}")
-                
-                # 从UI中移除任务显示
-                try:
-                    self.tasks_layout.removeWidget(task_info['task_frame'])
-                    task_info['task_frame'].deleteLater()
-                except Exception as e:
-                    print(f"从UI移除任务显示时出错: {e}")
-                
-                # 从任务管理器中清理资源
-                success = self.task_manager.auto_cleanup_completed_task(task_id)
-                
-                if success:
-                    self.log_message(f"任务已自动清理完成: {url}")
-                else:
-                    self.log_message(f"任务自动清理失败: {url}")
-                    
-        except Exception as e:
-            self.log_message(f"执行自动清理时出错: {str(e)}")
-
-    def auto_cleanup_completed_task(self, task_id: str) -> None:
-        """自动清理已完成的任务"""
-        try:
-            if task_id in self.task_manager.task_info_map:
-                task_info = self.task_manager.task_info_map[task_id]
-                url = task_info['url']
-                
-                self.log_message(f"正在自动清理已完成任务: {url}")
-                
-                # 遵循资源清理顺序：停止线程→清理文件→更新状态→移除UI→释放内存
-                
-                # 1. 停止任务线程
-                try:
-                    if task_info['worker'].isRunning():
-                        task_info['worker'].stop()
-                        task_info['worker'].wait(3000)  # 等待最多3秒
-                except Exception as e:
-                    print(f"停止任务线程时出错: {e}")
-                
-                # 2. 从TaskLogger中删除任务记录
-                try:
-                    if self.task_manager.task_logger:
-                        self.task_manager.task_logger.cleanup_completed_task(task_id)
-                except Exception as e:
-                    print(f"从TaskLogger删除任务时出错: {e}")
-                
-                # 3. 从UI中移除任务显示
-                try:
-                    self.tasks_layout.removeWidget(task_info['task_frame'])
-                    task_info['task_frame'].deleteLater()
-                except Exception as e:
-                    print(f"从UI移除任务显示时出错: {e}")
-                
-                # 4. 从任务管理器的数据结构中移除
-                try:
-                    if task_info in self.task_manager.active_tasks:
-                        self.task_manager.active_tasks.remove(task_info)
-                    elif task_info in self.task_manager.pending_tasks:
-                        self.task_manager.pending_tasks.remove(task_info)
-                    elif task_info in self.task_manager.paused_tasks:
-                        self.task_manager.paused_tasks.remove(task_info)
-                except Exception as e:
-                    print(f"从任务列表移除时出错: {e}")
-                
-                # 5. 删除任务映射
-                try:
-                    del self.task_manager.task_info_map[task_id]
-                except Exception as e:
-                    print(f"删除任务映射时出错: {e}")
-                
-                self.log_message(f"任务清理完成: {url}")
-                
-        except Exception as e:
-            self.log_message(f"清理任务时出错: {str(e)}")
 
     def change_download_path(self) -> None:
         """更改下载路径"""
@@ -1135,10 +1012,6 @@ class MainWindow(QMainWindow):
             time.sleep(1)
             print("任务已停止")
 
-        # 停止定时清理器
-        if hasattr(self, 'cleanup_timer'):
-            self.cleanup_timer.stop()
-            print("定时清理器已停止")
 
         print("程序关闭完成")
         # 接受关闭事件
