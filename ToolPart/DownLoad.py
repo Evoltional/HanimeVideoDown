@@ -8,32 +8,8 @@ from urllib.parse import unquote
 
 import requests
 from PyQt5.QtCore import QThread, pyqtSignal
-from pydoll.browser.chromium import Chrome
-from pydoll.browser.options import ChromiumOptions
-from pydoll.constants import PageLoadState
 
-
-def create_chrome_options(headless: bool = True, download_dir: str = "./downloads") -> ChromiumOptions:
-    """创建Chrome配置选项的通用函数"""
-    options = ChromiumOptions()
-
-    # 基本配置
-    options.headless = headless
-    options.start_timeout = 15
-    options.page_load_state = PageLoadState.INTERACTIVE
-
-    # 添加命令行参数
-    options.add_argument('--disable-gpu')
-    options.add_argument('--window-size=1920,1080')
-    options.add_argument('--no-sandbox')
-    options.add_argument('--disable-dev-shm-usage')
-
-    # 常见设置的辅助方法
-    options.block_notifications = True
-    options.block_popups = True
-    options.set_default_download_directory(download_dir)
-
-    return options
+from ToolPart.BrowserManager import BrowserManager
 
 
 def _sanitize_filename(filename: str) -> str:
@@ -59,10 +35,6 @@ class VideoDownloader:
         # 确保下载目录存在
         os.makedirs(self.download_dir, exist_ok=True)
 
-    def _create_chrome_options(self) -> ChromiumOptions:
-        """创建Chrome配置选项"""
-        return create_chrome_options(self.headless, self.download_dir)
-
     async def _check_pause(self, worker) -> bool:
         """检查暂停状态，如果暂停则等待"""
         if worker and hasattr(worker, 'should_pause'):
@@ -78,26 +50,14 @@ class VideoDownloader:
             print("浏览器操作被暂停")
             return None, None
 
-        options = self._create_chrome_options()
-        async with Chrome(options=options) as browser:
-            tab = await browser.start()
-
+        async with BrowserManager(headless=self.headless, download_dir=self.download_dir) as browser:
             print(f"访问下载页面: {download_page_url}")
-            await tab.go_to(download_page_url)
 
-            # 等待页面加载，期间检查暂停
-            for _ in range(50):  # 最多等待5秒，每次0.1秒
-                if await self._check_pause(worker):
-                    print("页面加载过程中检测到暂停指令")
-                    return None, None
-                try:
-                    # 检查页面是否已加载到可交互状态
-                    ready_state = await tab.execute_script("return document.readyState")
-                    if ready_state == 'complete' or ready_state == 'interactive':
-                        break
-                except:
-                    pass
-                await asyncio.sleep(0.1)
+            # 使用验证码绕过访问页面
+            tab = await browser.go_to_with_captcha_bypass(download_page_url)
+
+            # 等待页面加载
+            await asyncio.sleep(3)
 
             # 页面加载后再次检查暂停状态
             if await self._check_pause(worker):
@@ -110,15 +70,17 @@ class VideoDownloader:
                     print("元素查找前检测到暂停指令")
                     return None, None
 
-                # 查找下载链接列表表格，增加重试和暂停检查
+                # 查找下载链接列表表格
                 table_element = None
-                for attempt in range(5):
+                for attempt in range(3):
                     if await self._check_pause(worker):
                         print("查找表格时检测到暂停指令")
                         return None, None
 
-                    table_element = await tab.query('//*[@id="content-div"]/div[1]/div[4]/div/div/table',
-                                                    timeout=2, raise_exc=False)
+                    table_element = await browser.query_element(
+                        '//*[@id="content-div"]/div[1]/div[4]/div/div/table',
+                        timeout=5, raise_exc=False
+                    )
                     if table_element:
                         break
                     await asyncio.sleep(1)
@@ -134,16 +96,17 @@ class VideoDownloader:
                     print("下载按钮查找前检测到暂停指令")
                     return None, None
 
-                # 查找第一个下载按钮，增加重试和暂停检查
+                # 查找第一个下载按钮
                 first_download_btn = None
-                for attempt in range(5):
+                for attempt in range(3):
                     if await self._check_pause(worker):
                         print("查找下载按钮时检测到暂停指令")
                         return None, None
 
-                    first_download_btn = await tab.query(
+                    first_download_btn = await browser.query_element(
                         '//*[@id="content-div"]/div[1]/div[4]/div/div/table/tbody/tr[2]/td[5]/a',
-                        timeout=2, raise_exc=False)
+                        timeout=5, raise_exc=False
+                    )
                     if first_download_btn:
                         break
                     await asyncio.sleep(1)
@@ -218,7 +181,6 @@ class VideoDownloader:
                 return False
 
         print(f"开始下载: {safe_filename} (临时文件: {downloading_filename})")
-        print(f"下载链接: {video_url}")
 
         retry_count = 0
         while retry_count < self.max_retries:
@@ -321,10 +283,6 @@ class HanimeScraper:
         self.active_threads = 0
         self.lock = threading.Lock()
 
-    def _create_chrome_options(self) -> ChromiumOptions:
-        """创建Chrome配置选项"""
-        return create_chrome_options(self.headless, self.downloader.download_dir)
-
     async def _check_pause(self, worker) -> bool:
         """检查暂停状态，如果暂停则等待"""
         if worker and hasattr(worker, 'should_pause'):
@@ -338,32 +296,20 @@ class HanimeScraper:
             print("获取视频链接前检测到暂停指令")
             return []
 
-        options = self._create_chrome_options()
-        async with Chrome(options=options) as browser:
-            tab = await browser.start()
+        async with BrowserManager(headless=self.headless, download_dir=self.downloader.download_dir) as browser:
+            # 使用验证码绕过访问页面
+            tab = await browser.go_to_with_captcha_bypass(start_url)
 
-            await tab.go_to(start_url)
-
-            # 等待页面加载，期间检查暂停
-            for _ in range(30):  # 最多等待3秒，每次0.1秒
-                if await self._check_pause(worker):
-                    print("页面加载过程中检测到暂停指令")
-                    return []
-                try:
-                    # 检查页面是否已加载到可交互状态
-                    ready_state = await tab.execute_script("return document.readyState")
-                    if ready_state == 'complete' or ready_state == 'interactive':
-                        break
-                except:
-                    pass
-                await asyncio.sleep(0.1)
+            # 等待页面加载
+            await asyncio.sleep(3)
 
             # 页面加载后检查暂停状态
             if await self._check_pause(worker):
                 print("页面加载后检测到暂停指令")
                 return []
 
-            overlay_elements = await tab.find(class_name='overlay', find_all=True, timeout=10, raise_exc=False)
+            overlay_elements = await browser.find_element(class_name='overlay', find_all=True, timeout=10,
+                                                          raise_exc=False)
 
             if overlay_elements:
                 for element in overlay_elements:
@@ -372,14 +318,8 @@ class HanimeScraper:
                         print("处理视频链接时检测到暂停指令")
                         return list(self.all_video_links)
 
-                    # 检查元素类型，确定是否需要await
-                    if hasattr(element, 'get_attribute') and callable(getattr(element, 'get_attribute')):
-                        # 元素是异步对象，需要await
-                        href = element.get_attribute('href')
-                    else:
-                        # 元素已经是字符串，直接使用
-                        href = element.get_attribute('href')
-
+                    # 获取链接
+                    href = element.get_attribute('href')
                     if href:
                         self.all_video_links.add(href)
 
@@ -398,51 +338,33 @@ class HanimeScraper:
             print("处理链接前检测到暂停指令")
             return False
 
-        # 使用独立的Chrome实例处理每个链接
-        options = self._create_chrome_options()
-        async with Chrome(options=options) as browser:
-            tab = await browser.start()
-
+        async with BrowserManager(headless=self.headless, download_dir=self.downloader.download_dir) as browser:
             try:
-                await tab.go_to(video_url)
+                # 使用验证码绕过访问页面
+                tab = await browser.go_to_with_captcha_bypass(video_url)
 
-                # 等待页面加载，期间检查暂停
-                for _ in range(30):  # 最多等待3秒，每次0.1秒
-                    if await self._check_pause(worker):
-                        print("页面加载过程中检测到暂停指令")
-                        return False
-                    try:
-                        # 检查页面是否已加载到可交互状态
-                        ready_state = await tab.execute_script("return document.readyState")
-                        if ready_state == 'complete' or ready_state == 'interactive':
-                            break
-                    except:
-                        pass
-                    await asyncio.sleep(0.1)
+                # 等待页面加载
+                await asyncio.sleep(3)
 
                 # 检查暂停状态
                 if await self._check_pause(worker):
                     print("页面加载后检测到暂停指令")
                     return False
 
-                # 查找下载按钮，增加重试和暂停检查
+                # 查找下载按钮
                 download_btn = None
-                for attempt in range(5):
+                for attempt in range(3):
                     if await self._check_pause(worker):
                         print("查找下载按钮时检测到暂停指令")
                         return False
 
-                    download_btn = await tab.find(id='downloadBtn', timeout=2, raise_exc=False)
+                    download_btn = await browser.find_element(id='downloadBtn', timeout=5, raise_exc=False)
                     if download_btn:
                         break
                     await asyncio.sleep(1)
 
                 if download_btn:
-                    # 同样处理download_btn的get_attribute调用
-                    if hasattr(download_btn, 'get_attribute') and callable(getattr(download_btn, 'get_attribute')):
-                        download_href = download_btn.get_attribute('href')
-                    else:
-                        download_href = download_btn.get_attribute('href')
+                    download_href = download_btn.get_attribute('href')
 
                     if download_href:
                         self.download_links.append(download_href)
@@ -464,12 +386,6 @@ class HanimeScraper:
             except Exception as e:
                 print(f"处理链接 {video_url} 时出错: {e}")
                 return False
-            finally:
-                # 确保浏览器tab关闭
-                try:
-                    await tab.close()
-                except:
-                    pass
 
     def _process_link_thread(self, worker):
         """处理单个链接的线程函数"""
