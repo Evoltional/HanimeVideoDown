@@ -123,8 +123,8 @@ class BrowserManager:
             return None
         
         try:
-            # pydoll中使用find方法查找元素
-            element = await self.tab.find(xpath=xpath)
+            # pydoll中使用find方法查找元素，设置超时时间
+            element = await self.tab.find(xpath=xpath, timeout=timeout * 1000)  # 转换为毫秒
             return element
         except Exception as e:
             self.logger.debug(f"查找元素失败 {xpath}: {e}")

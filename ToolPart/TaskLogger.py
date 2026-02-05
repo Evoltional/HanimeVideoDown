@@ -1,10 +1,9 @@
 import json
 import os
 import threading
-import time
 from datetime import datetime
-from typing import Dict, List, Any
 from enum import Enum
+from typing import Dict, List, Any
 
 
 class LogLevel(Enum):
@@ -98,7 +97,6 @@ class TaskLogger:
         with self.lock:
             tasks = self._load_tasks()
             if task_id in tasks:
-                task_info = tasks[task_id]
                 del tasks[task_id]
                 self._save_tasks(tasks)
                 self.log(LogLevel.INFO, f"已从TaskLogger删除任务: {task_id}")
@@ -219,8 +217,13 @@ class TaskLogger:
         # 控制台输出（不带颜色）
         print(f"[{timestamp}] {level.value} - {message}")
         
-        # 可以在这里添加文件日志记录逻辑
-        # 例如写入日志文件等
+        # 文件日志记录
+        try:
+            log_file = os.path.join(self.log_dir, "task_log.txt")
+            with open(log_file, 'a', encoding='utf-8') as f:
+                f.write(f"[{log_entry['timestamp']}] {log_entry['level']} - {log_entry['message']}\n")
+        except Exception as e:
+            print(f"写入日志文件失败: {e}")
     
     def get_plain_log_message(self, level: LogLevel, message: str) -> str:
         """获取纯文本格式的日志消息"""

@@ -93,17 +93,16 @@ class TaskManager:
             if self.task_logger:
                 self.task_logger.update_task_status(task_info['task_id'], 'running')
 
-            # 更新任务状态显示
-            status_label = task_info['task_frame'].findChild(QLabel, "status_label")
-            if status_label:
-                status_label.setText("状态: 运行中")
-                status_label.setStyleSheet("color: #2ecc71;")
-
-            # 更新暂停按钮状态
-            pause_btn = task_info['task_frame'].findChild(QPushButton, "pause_btn")
-            if pause_btn:
-                pause_btn.setEnabled(True)
-                pause_btn.setStyleSheet("")
+            # 更新任务UI状态
+            _update_task_ui_status(
+                task_info['task_frame'],
+                "状态: 运行中",
+                "#2ecc71",
+                pause_enabled=True,
+                pause_style="",
+                resume_enabled=False,
+                resume_style="background-color: #7f8c8d;"
+            )
 
     def pause_task(self, worker):
         """暂停指定任务"""
@@ -124,23 +123,16 @@ class TaskManager:
                 if self.task_logger:
                     self.task_logger.update_task_status(task_id, 'paused')
 
-                # 更新任务状态显示
-                status_label = task_info['task_frame'].findChild(QLabel, "status_label")
-                if status_label:
-                    status_label.setText("状态: 已暂停")
-                    status_label.setStyleSheet("color: #f39c12;")
-
-                # 更新暂停按钮状态
-                pause_btn = task_info['task_frame'].findChild(QPushButton, "pause_btn")
-                if pause_btn:
-                    pause_btn.setEnabled(False)  # 暂停按钮变灰
-                    pause_btn.setStyleSheet("background-color: #7f8c8d;")
-
-                # 启用继续按钮
-                resume_btn = task_info['task_frame'].findChild(QPushButton, "resume_btn")
-                if resume_btn:
-                    resume_btn.setEnabled(True)
-                    resume_btn.setStyleSheet("")
+                # 更新任务UI状态
+                _update_task_ui_status(
+                    task_info['task_frame'],
+                    "状态: 已暂停",
+                    "#f39c12",
+                    pause_enabled=False,
+                    pause_style="background-color: #7f8c8d;",
+                    resume_enabled=True,
+                    resume_style=""
+                )
 
                 # 从活跃任务中移除，加入暂停队列
                 if task_info in self.active_tasks:
@@ -168,23 +160,16 @@ class TaskManager:
                 if self.task_logger:
                     self.task_logger.update_task_status(task_id, 'running')
 
-                # 更新任务状态显示
-                status_label = task_info['task_frame'].findChild(QLabel, "status_label")
-                if status_label:
-                    status_label.setText("状态: 运行中")
-                    status_label.setStyleSheet("color: #2ecc71;")
-
-                # 更新暂停按钮状态
-                pause_btn = task_info['task_frame'].findChild(QPushButton, "pause_btn")
-                if pause_btn:
-                    pause_btn.setEnabled(True)
-                    pause_btn.setStyleSheet("background-color: #3498db;")
-
-                # 恢复任务后，由于任务正在运行，继续按钮应保持禁用
-                resume_btn = task_info['task_frame'].findChild(QPushButton, "resume_btn")
-                if resume_btn:
-                    resume_btn.setEnabled(False)
-                    resume_btn.setStyleSheet("background-color: #7f8c8d;")
+                # 更新任务UI状态
+                _update_task_ui_status(
+                    task_info['task_frame'],
+                    "状态: 运行中",
+                    "#2ecc71",
+                    pause_enabled=True,
+                    pause_style="background-color: #3498db;",
+                    resume_enabled=False,
+                    resume_style="background-color: #7f8c8d;"
+                )
 
                 # 将任务从暂停队列移到活跃队列
                 if task_info in self.paused_tasks:
@@ -301,23 +286,16 @@ class TaskManager:
             if self.task_logger:
                 self.task_logger.update_task_status(task_info['task_id'], 'paused')
 
-            # 更新任务状态显示
-            status_label = task_info['task_frame'].findChild(QLabel, "status_label")
-            if status_label:
-                status_label.setText("状态: 已暂停")
-                status_label.setStyleSheet("color: #f39c12;")
-
-            # 更新暂停按钮状态
-            pause_btn = task_info['task_frame'].findChild(QPushButton, "pause_btn")
-            if pause_btn:
-                pause_btn.setEnabled(False)  # 暂停按钮变灰
-                pause_btn.setStyleSheet("background-color: #7f8c8d;")
-
-            # 启用继续按钮
-            resume_btn = task_info['task_frame'].findChild(QPushButton, "resume_btn")
-            if resume_btn:
-                resume_btn.setEnabled(True)
-                resume_btn.setStyleSheet("")
+            # 更新任务UI状态
+            _update_task_ui_status(
+                task_info['task_frame'],
+                "状态: 已暂停",
+                "#f39c12",
+                pause_enabled=False,
+                pause_style="background-color: #7f8c8d;",
+                resume_enabled=True,
+                resume_style=""
+            )
 
         # 移动活跃任务到暂停任务列表
         for task_info in tasks_to_pause:
@@ -803,11 +781,12 @@ class MainWindow(QMainWindow):
                 if self.task_manager.task_logger:
                     self.task_manager.task_logger.update_task_status(task_id, 'completed')
 
-                # 更新任务状态
-                status_label = task_info['task_frame'].findChild(QLabel, "status_label")
-                if status_label:
-                    status_label.setText("状态: 已完成")
-                    status_label.setStyleSheet("color: #2ecc71;")
+                # 更新任务UI状态
+                _update_task_ui_status(
+                    task_info['task_frame'],
+                    "状态: 已完成",
+                    "#2ecc71"
+                )
                 
                 # 任务成功完成后，设置状态为finished并启动自动清理
                 task_info['status'] = 'finished'
@@ -822,23 +801,16 @@ class MainWindow(QMainWindow):
                 if self.task_manager.task_logger:
                     self.task_manager.task_logger.update_task_status(task_id, 'failed')
 
-                # 更新任务状态
-                status_label = task_info['task_frame'].findChild(QLabel, "status_label")
-                if status_label:
-                    status_label.setText("状态: 失败")
-                    status_label.setStyleSheet("color: #e74c3c;")
-
-                # 下载失败后，任务应该可以重新开始
-                # 启用继续按钮，禁用暂停按钮
-                resume_btn = task_info['task_frame'].findChild(QPushButton, "resume_btn")
-                if resume_btn:
-                    resume_btn.setEnabled(True)
-                    resume_btn.setStyleSheet("")
-
-                pause_btn = task_info['task_frame'].findChild(QPushButton, "pause_btn")
-                if pause_btn:
-                    pause_btn.setEnabled(False)
-                    pause_btn.setStyleSheet("background-color: #7f8c8d;")
+                # 更新任务UI状态
+                _update_task_ui_status(
+                    task_info['task_frame'],
+                    "状态: 失败",
+                    "#e74c3c",
+                    pause_enabled=False,
+                    pause_style="background-color: #7f8c8d;",
+                    resume_enabled=True,
+                    resume_style=""
+                )
 
                 # 将任务状态设置为暂停，允许用户重新开始
                 task_info['status'] = 'paused'
@@ -912,9 +884,10 @@ class MainWindow(QMainWindow):
 
         # 状态标签
         status_text = "状态: 暂停中" if is_resume else "状态: 待处理"
+        status_color = "#f39c12" if is_resume else "#7f8c8d"
         status_label = QLabel(status_text)
         status_label.setObjectName("status_label")
-        status_label.setStyleSheet("color: #7f8c8d;" if not is_resume else "color: #f39c12;")
+        status_label.setStyleSheet(f"color: {status_color};")
         task_layout.addWidget(status_label)
 
         # 按钮布局
