@@ -4,6 +4,16 @@ import threading
 import time
 from datetime import datetime
 from typing import Dict, List, Any
+from enum import Enum
+
+
+class LogLevel(Enum):
+    """日志级别枚举"""
+    DEBUG = "DEBUG"
+    INFO = "INFO"
+    WARNING = "WARNING"
+    ERROR = "ERROR"
+    SUCCESS = "SUCCESS"
 
 
 class TaskLogger:
@@ -19,6 +29,8 @@ class TaskLogger:
 
         # 初始化日志文件
         self._init_log_file()
+        
+        # 标准日志输出，无颜色
 
     def _init_log_file(self) -> None:
         """初始化日志文件"""
@@ -89,10 +101,10 @@ class TaskLogger:
                 task_info = tasks[task_id]
                 del tasks[task_id]
                 self._save_tasks(tasks)
-                print(f"已从TaskLogger删除任务: {task_id}")
+                self.log(LogLevel.INFO, f"已从TaskLogger删除任务: {task_id}")
                 return True
             else:
-                print(f"任务不存在，无法删除: {task_id}")
+                self.log(LogLevel.WARNING, f"任务不存在，无法删除: {task_id}")
                 return False
 
     def get_all_tasks(self) -> Dict[str, Any]:
@@ -152,7 +164,7 @@ class TaskLogger:
             # 删除符合条件的任务
             for task_id in tasks_to_remove:
                 del tasks[task_id]
-                print(f"已自动清理任务: {task_id}")
+                self.log(LogLevel.INFO, f"已自动清理任务: {task_id}")
             
             # 保存更新后的任务列表
             if tasks_to_remove:
@@ -174,7 +186,7 @@ class TaskLogger:
             with open(self.config_file, 'w', encoding='utf-8') as f:
                 json.dump(tasks, f, indent=4, ensure_ascii=False)
         except Exception as e:
-            print(f"保存任务日志失败: {e}")
+            self.log(LogLevel.ERROR, f"保存任务日志失败: {e}")
     
     def cleanup_completed_task(self, task_id: str) -> bool:
         """清理单个已完成的任务"""
@@ -186,12 +198,32 @@ class TaskLogger:
                 if task_info["status"] == "completed":
                     del tasks[task_id]
                     self._save_tasks(tasks)
-                    print(f"已清理已完成任务: {task_id}")
+                    self.log(LogLevel.INFO, f"已清理已完成任务: {task_id}")
                     return True
                 else:
-                    print(f"任务 {task_id} 状态为 {task_info['status']}，不能清理")
+                    self.log(LogLevel.WARNING, f"任务 {task_id} 状态为 {task_info['status']}，不能清理")
                     return False
             else:
-                print(f"任务 {task_id} 不存在")
+                self.log(LogLevel.WARNING, f"任务 {task_id} 不存在")
                 return False
+    
+    def log(self, level: LogLevel, message: str) -> None:
+        """记录结构化日志"""
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        log_entry = {
+            "timestamp": timestamp,
+            "level": level.value,
+            "message": message
+        }
+        
+        # 控制台输出（不带颜色）
+        print(f"[{timestamp}] {level.value} - {message}")
+        
+        # 可以在这里添加文件日志记录逻辑
+        # 例如写入日志文件等
+    
+    def get_plain_log_message(self, level: LogLevel, message: str) -> str:
+        """获取纯文本格式的日志消息"""
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        return f"[{timestamp}] {level.value} - {message}"
     

@@ -731,10 +731,27 @@ class MainWindow(QMainWindow):
         except Exception as e:
             self.log_message(f"粘贴失败: {str(e)}")
 
-    def log_message(self, message: str) -> None:
-        """添加消息到日志区域"""
+    def log_message(self, message: str, level=None) -> None:
+        """添加消息到日志区域，标准格式输出"""
+        # 如果没有指定日志级别，默认为INFO
+        if level is None:
+            level = "INFO"
+            # 根据消息内容自动判断日志级别
+            if "错误" in message or "失败" in message or "exception" in message.lower():
+                level = "ERROR"
+            elif "警告" in message or "注意" in message:
+                level = "WARNING"
+            elif "成功" in message or "完成" in message:
+                level = "SUCCESS"
+            elif "调试" in message or "debug" in message.lower():
+                level = "DEBUG"
+        
         timestamp = time.strftime("%H:%M:%S")
-        self.log_area.append(f"[{timestamp}] {message}")
+        
+        # 标准文本输出
+        log_message = f"[{timestamp}] {level} - {message}"
+        self.log_area.append(log_message)
+        
         # 自动滚动到底部
         self.log_area.verticalScrollBar().setValue(
             self.log_area.verticalScrollBar().maximum()
@@ -856,6 +873,11 @@ class MainWindow(QMainWindow):
         else:
             self.log_message("没有暂停的任务需要恢复")
 
+    def clear_log(self) -> None:
+        """清空日志显示"""
+        self.log_area.clear()
+        self.log_message("日志已清空")
+        
     def clear_all_tasks(self) -> None:
         """清空所有任务"""
         try:
