@@ -242,13 +242,11 @@ class VideoDownloader:
                             if chunk_counter % 5 == 0:
                                 if worker and hasattr(worker, 'should_pause') and worker.should_pause():
                                     print("\n下载已被暂停")
-                                    # 保留下载中的文件，不删除
                                     return False
 
                                 # 检查是否停止
                                 if worker and hasattr(worker, 'is_running') and not worker.is_running():
                                     print("\n下载已被停止")
-                                    # 保留下载中的文件，不删除
                                     return False
 
                             f.write(chunk)

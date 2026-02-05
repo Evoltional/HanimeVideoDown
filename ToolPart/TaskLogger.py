@@ -81,22 +81,19 @@ class TaskLogger:
                     tasks[task_id]["updated_at"] = datetime.now().isoformat()
                     self._save_tasks(tasks)
 
-    def remove_task(self, task_id: str) -> None:
-        """删除任务"""
+    def remove_task(self, task_id: str) -> bool:
+        """删除任务，返回是否删除成功"""
         with self.lock:
             tasks = self._load_tasks()
             if task_id in tasks:
                 task_info = tasks[task_id]
-                # 如果任务未完成，删除未完成的视频文件
-                if task_info["status"] not in ["completed"]:
-                    self._cleanup_incomplete_videos(task_info)
-                
-                # 如果是完成的任务，也可以清理相关记录但保留文件
-                elif task_info["status"] == "completed":
-                    self._cleanup_completed_task_records(task_info)
-
                 del tasks[task_id]
                 self._save_tasks(tasks)
+                print(f"已从TaskLogger删除任务: {task_id}")
+                return True
+            else:
+                print(f"任务不存在，无法删除: {task_id}")
+                return False
 
     def get_all_tasks(self) -> Dict[str, Any]:
         """获取所有任务"""
@@ -130,135 +127,36 @@ class TaskLogger:
     def clear_all_tasks(self) -> None:
         """清空所有任务"""
         with self.lock:
-            tasks = self._load_tasks()
-
-            # 清理所有未完成任务的视频文件
-            for task_id, task_info in tasks.items():
-                if task_info["status"] not in ["completed"]:
-                    self._cleanup_incomplete_videos(task_info)
-
             # 清空任务文件
             with open(self.config_file, 'w', encoding='utf-8') as f:
                 json.dump({}, f, indent=4, ensure_ascii=False)
 
-    def cleanup_on_exit(self) -> None:
-        """程序退出时清理未完成下载的视频文件"""
-        print("开始执行退出清理...")
+    def auto_cleanup_completed_tasks(self, days_old: int = 1) -> None:
+        """自动清理已完成超过指定天数的任务"""
         with self.lock:
             tasks = self._load_tasks()
-            print(f"找到 {len(tasks)} 个任务记录")
-
-            # 清理每个未完成任务的文件
+            current_time = datetime.now()
+            
+            tasks_to_remove = []
+            
             for task_id, task_info in tasks.items():
-                if task_info["status"] not in ["completed"]:
-                    print(f"清理任务 {task_id} 的未完成文件...")
-                    self._cleanup_incomplete_videos(task_info)
-            
-            # 额外检查常见的下载目录
-            self._cleanup_common_download_dirs()
-            
-            print("退出清理完成")
-    
-    def _cleanup_common_download_dirs(self):
-        """清理常见的下载目录中的未完成文件"""
-        print("检查常见下载目录...")
-        common_dirs = [
-            "./Download",
-            "./downloads", 
-            "E:/Temp/NEW",
-            os.path.join(os.getcwd(), "Download"),
-            os.path.join(os.getcwd(), "downloads")
-        ]
-        
-        for dir_path in common_dirs:
-            if os.path.exists(dir_path):
-                print(f"检查目录: {dir_path}")
-                try:
-                    files = os.listdir(dir_path)
-                    mp4_files = [f for f in files if f.endswith('.mp4') and os.path.isfile(os.path.join(dir_path, f))]
+                if task_info["status"] == "completed":
+                    # 解析创建时间
+                    created_at = datetime.fromisoformat(task_info["created_at"])
+                    # 计算天数差
+                    days_diff = (current_time - created_at).days
                     
-                    for filename in mp4_files:
-                        file_path = os.path.join(dir_path, filename)
-                        file_size = os.path.getsize(file_path)
-                        file_mtime = os.path.getmtime(file_path)
-                        current_time = time.time()
-                        
-                        # 删除条件：小于10MB或超过1小时未修改
-                        if file_size < 10 * 1024 * 1024 or (current_time - file_mtime) > 3600:
-                            try:
-                                os.remove(file_path)
-                                print(f"  已删除未完成文件: {filename} ({file_size} bytes)")
-                            except PermissionError:
-                                print(f"  文件被占用，跳过: {filename}")
-                            except Exception as e:
-                                print(f"  删除文件失败 {filename}: {e}")
-                except Exception as e:
-                    print(f"检查目录 {dir_path} 时出错: {e}")
-
-    def _cleanup_incomplete_videos(self, task_info: Dict[str, Any]) -> None:
-        """清理未完成任务的视频文件"""
-        try:
-            download_dir = task_info.get("download_dir", "./Download")
-            downloaded_videos = task_info.get("downloaded_videos", [])
-            video_links = task_info.get("video_links", [])
+                    if days_diff >= days_old:
+                        tasks_to_remove.append(task_id)
             
-            print(f"清理目录 {download_dir} 中的未完成文件")
+            # 删除符合条件的任务
+            for task_id in tasks_to_remove:
+                del tasks[task_id]
+                print(f"已自动清理任务: {task_id}")
             
-            if not os.path.exists(download_dir):
-                print(f"下载目录不存在: {download_dir}")
-                return
-                
-            # 删除已下载但未完成的视频文件
-            for video_filename in downloaded_videos:
-                file_path = os.path.join(download_dir, video_filename)
-                if os.path.exists(file_path):
-                    try:
-                        os.remove(file_path)
-                        print(f"已删除未完成视频文件: {file_path}")
-                    except PermissionError:
-                        print(f"文件被占用，无法删除: {file_path}")
-                    except Exception as e:
-                        print(f"删除文件 {file_path} 失败: {e}")
-                else:
-                    print(f"文件不存在: {file_path}")
-                        
-            # 删除下载中的临时文件
-            downloading_files = self.get_downloading_files(download_dir)
-            for filename in downloading_files:
-                file_path = os.path.join(download_dir, filename)
-                try:
-                    if os.path.exists(file_path):
-                        os.remove(file_path)
-                        print(f"已删除下载中文件: {file_path}")
-                    else:
-                        print(f"下载中文件不存在: {file_path}")
-                except PermissionError:
-                    print(f"下载中文件被占用，无法删除: {file_path}")
-                except Exception as e:
-                    print(f"删除下载中文件 {file_path} 失败: {e}")
-                    
-        except Exception as e:
-            print(f"清理未完成视频文件时出错: {e}")
-    
-    def _cleanup_completed_task_records(self, task_info: Dict[str, Any]) -> None:
-        """清理已完成任务的相关记录（保留实际文件）"""
-        try:
-            download_dir = task_info.get("download_dir", "./Download")
-            print(f"清理已完成任务记录，保留文件在: {download_dir}")
-            
-            # 只清理临时文件，保留已完成的文件
-            downloading_files = self.get_downloading_files(download_dir)
-            for filename in downloading_files:
-                file_path = os.path.join(download_dir, filename)
-                try:
-                    if os.path.exists(file_path):
-                        os.remove(file_path)
-                        print(f"已删除临时文件: {file_path}")
-                except Exception as e:
-                    print(f"删除临时文件 {file_path} 失败: {e}")
-                    
-        except Exception as e:
-            print(f"清理完成任务记录时出错: {e}")
+            # 保存更新后的任务列表
+            if tasks_to_remove:
+                self._save_tasks(tasks)
 
     # 文件清理功能已移除，现在使用文件名前缀方式标识下载状态
 
@@ -278,40 +176,22 @@ class TaskLogger:
         except Exception as e:
             print(f"保存任务日志失败: {e}")
     
-    def auto_cleanup_completed_tasks(self) -> None:
-        """自动清理已完成且超时的任务"""
-        try:
-            with self.lock:
-                tasks = self._load_tasks()
-                current_time = time.time()
-                tasks_to_remove = []
-                
-                for task_id, task_info in tasks.items():
-                    # 检查是否是完成状态且超过一定时间
-                    if task_info.get("status") == "completed":
-                        updated_time_str = task_info.get("updated_at", "")
-                        try:
-                            # 解析ISO格式的时间字符串
-                            from datetime import datetime
-                            updated_time = datetime.fromisoformat(updated_time_str.replace('Z', '+00:00'))
-                            updated_timestamp = updated_time.timestamp()
-                            
-                            # 如果完成超过24小时，则考虑清理
-                            if current_time - updated_timestamp > 24 * 3600:
-                                tasks_to_remove.append((task_id, task_info))
-                        except Exception as e:
-                            print(f"解析任务时间戳失败 {task_id}: {e}")
-                
-                # 执行清理
-                for task_id, task_info in tasks_to_remove:
-                    print(f"自动清理超时的完成任务: {task_id}")
-                    self._cleanup_completed_task_records(task_info)
+    def cleanup_completed_task(self, task_id: str) -> bool:
+        """清理单个已完成的任务"""
+        with self.lock:
+            tasks = self._load_tasks()
+            if task_id in tasks:
+                task_info = tasks[task_id]
+                # 只删除已完成的任务
+                if task_info["status"] == "completed":
                     del tasks[task_id]
-                
-                # 保存更新后的任务列表
-                if tasks_to_remove:
                     self._save_tasks(tasks)
-                    print(f"已自动清理 {len(tasks_to_remove)} 个超时的完成任务")
-                    
-        except Exception as e:
-            print(f"自动清理完成任务时出错: {e}")
+                    print(f"已清理已完成任务: {task_id}")
+                    return True
+                else:
+                    print(f"任务 {task_id} 状态为 {task_info['status']}，不能清理")
+                    return False
+            else:
+                print(f"任务 {task_id} 不存在")
+                return False
+    
