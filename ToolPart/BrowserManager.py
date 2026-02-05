@@ -1,78 +1,47 @@
-"""
-浏览器管理模块
-负责浏览器实例的创建、配置和管理
-使用 pyppeteer 作为浏览器自动化工具
-"""
-
 import asyncio
 import logging
-from typing import Optional, Dict, Any
-from pathlib import Path
-import sys
 
-# 添加项目根目录到路径
-project_root = Path(__file__).parent.parent
-sys.path.insert(0, str(project_root))
-
-try:
-    import pyppeteer
-    from pyppeteer import launch
-    from pyppeteer.browser import Browser
-    from pyppeteer.page import Page
-except ImportError:
-    pyppeteer = None
-    logging.warning("pyppeteer 未安装，请运行: pip install pyppeteer")
-
-
+from pydoll.browser.chromium import Chrome
+from pydoll.browser.options import ChromiumOptions
 
 
 class BrowserManager:
-    """浏览器管理器类"""
+    """浏览器管理器，负责浏览器的启动、配置和操作"""
     
-    def __init__(self, headless: bool = True, timeout: int = 30000):
+    def __init__(self, headless: bool = True, download_dir: str = "./downloads", timeout: int = 30000):
         """
         初始化浏览器管理器
         
         Args:
-            headless: 是否启用无头模式
-            timeout: 页面加载超时时间(毫秒)
+            headless: 是否使用无头模式
+            download_dir: 下载目录
+            timeout: 操作超时时间(毫秒)
         """
-
         self.headless = headless
+        self.download_dir = download_dir
         self.timeout = timeout
-        self.browser: Optional[Browser] = None
-        self.page: Optional[Page] = None
+        self.browser = None
+        self.tab = None
         self._is_running = False
-        
-        # 配置日志
         self.logger = logging.getLogger(__name__)
         
     async def start(self) -> bool:
         """
-        启动浏览器实例
+        启动浏览器
         
         Returns:
             bool: 启动是否成功
         """
         try:
-            if not pyppeteer:
-                self.logger.error("pyppeteer 未安装，无法启动浏览器")
-                return False
-                
-            if self._is_running:
-                self.logger.warning("浏览器已在运行中")
-                return True
-            
             # 创建浏览器选项
-            browser_options = self._create_browser_options()
+            options = self._create_chrome_options()
             
             # 启动浏览器
-            self.browser = await launch(**browser_options)
-            self.page = await self.browser.newPage()
+            self.browser = Chrome(options=options)
+            await self.browser.__aenter__()
             
-            # 设置页面超时
-            await self.page.setDefaultNavigationTimeout(self.timeout)
-            await self.page.setDefaultTimeout(self.timeout)
+            # 启动标签页
+            self.tab = await self.browser.start()
             
             self._is_running = True
             self.logger.info("浏览器启动成功")
@@ -80,192 +49,187 @@ class BrowserManager:
             
         except Exception as e:
             self.logger.error(f"启动浏览器失败: {e}")
-            await self.close()
             return False
     
-    def _create_browser_options(self) -> Dict[str, Any]:
+    def _create_chrome_options(self) -> ChromiumOptions:
         """
-        创建浏览器启动选项
+        创建Chrome浏览器选项
         
         Returns:
-            Dict[str, Any]: 浏览器选项字典
+            ChromiumOptions: 浏览器选项对象
         """
-        options = {
-            'headless': self.headless,
-            'args': [
-                '--no-sandbox',
-                '--disable-setuid-sandbox',
-                '--disable-dev-shm-usage',
-                '--disable-accelerated-2d-canvas',
-                '--no-first-run',
-                '--no-zygote',
-                '--disable-gpu',
-                '--disable-web-security',
-                '--disable-features=IsolateOrigins,site-per-process',
-                '--allow-running-insecure-content',
-            ]
-        }
+        options = ChromiumOptions()
         
-        # 如果不是无头模式，添加窗口大小参数
-        if not self.headless:
-            options['args'].extend([
-                '--window-size=1920,1080'
-            ])
+        # 基本设置
+        options.add_argument('--disable-blink-features=AutomationControlled')
+        options.add_argument('--no-sandbox')
+        options.add_argument('--disable-dev-shm-usage')
+        options.add_argument('--disable-gpu')
         
-        # 添加用户数据目录（可选）
-        user_data_dir = self.config.get('browser.user_data_dir')
-        if user_data_dir:
-            options['userDataDir'] = user_data_dir
-            
-        # 添加代理设置（可选）
-        proxy = self.config.get('browser.proxy')
-        if proxy:
-            options['args'].append(f'--proxy-server={proxy}')
-            
+        # 无头模式设置
+        if self.headless:
+            options.add_argument('--headless=new')
+        
+        # 下载设置
+        options.set_default_download_directory(self.download_dir)
+        
+        # 其他优化设置
+        options.add_argument('--disable-extensions')
+        options.add_argument('--disable-plugins')
+        options.add_argument('--disable-images')  # 可选：禁用图片加载以提高速度
+        
         return options
     
-    async def navigate_to(self, url: str) -> bool:
+    async def go_to_with_captcha_bypass(self, url: str):
         """
-        导航到指定URL
+        访问URL并自动绕过验证码
         
         Args:
             url: 目标URL
             
         Returns:
-            bool: 导航是否成功
+            tab: 浏览器标签页对象
         """
+        if not self._is_running or not self.tab:
+            raise RuntimeError("浏览器未启动")
+        
         try:
-            if not self._is_running or not self.page:
-                self.logger.error("浏览器未启动")
-                return False
-                
-            await self.page.goto(url, {'waitUntil': 'networkidle2'})
-            self.logger.info(f"成功导航到: {url}")
-            return True
+            # 使用上下文管理器自动处理验证码
+            async with self.tab.expect_and_bypass_cloudflare_captcha():
+                await self.tab.go_to(url)
+            
+            self.logger.info(f"成功访问页面: {url}")
+            return self.tab
             
         except Exception as e:
-            self.logger.error(f"导航失败 {url}: {e}")
-            return False
+            self.logger.error(f"访问页面失败 {url}: {e}")
+            raise
     
-    async def wait_for_selector(self, selector: str, timeout: int = 30000) -> bool:
+    async def query_element(self, xpath: str, timeout: int = 5, raise_exc: bool = True):
+        """
+        使用XPath查询元素
+        
+        Args:
+            xpath: XPath表达式
+            timeout: 超时时间(秒)
+            raise_exc: 是否抛出异常
+            
+        Returns:
+            元素对象或None
+        """
+        if not self.tab:
+            if raise_exc:
+                raise RuntimeError("浏览器标签页未初始化")
+            return None
+        
+        try:
+            # pydoll中使用find方法查找元素
+            element = await self.tab.find(xpath=xpath)
+            return element
+        except Exception as e:
+            self.logger.debug(f"查找元素失败 {xpath}: {e}")
+            if raise_exc:
+                raise
+            return None
+    
+    async def find_element(self, **kwargs):
+        """
+        查找元素，支持多种查找方式
+        
+        Args:
+            **kwargs: 查找参数，如id='element_id', class_name='class-name'等
+            
+        Returns:
+            元素对象或None
+        """
+        if not self.tab:
+            raise RuntimeError("浏览器标签页未初始化")
+        
+        try:
+            # 根据参数类型调用不同的查找方法
+            element = await self.tab.find(**kwargs)
+            return element
+        except Exception as e:
+            self.logger.debug(f"查找元素失败: {kwargs}, 错误: {e}")
+            raise
+    
+    async def get_element_attribute(self, element, attribute: str):
+        """
+        获取元素属性值
+        
+        Args:
+            element: 元素对象
+            attribute: 属性名称
+            
+        Returns:
+            属性值或None
+        """
+        try:
+            if hasattr(element, 'get_attribute'):
+                return element.get_attribute(attribute)
+            else:
+                # 如果元素对象没有get_attribute方法，尝试其他方式
+                return await element.get_attribute(attribute)
+        except Exception as e:
+            self.logger.debug(f"获取元素属性失败 {attribute}: {e}")
+            return None
+    
+    async def get_element_text(self, element) -> str:
+        """
+        获取元素文本内容
+        
+        Args:
+            element: 元素对象
+            
+        Returns:
+            文本内容
+        """
+        try:
+            # 直接await element.text协程
+            return await element.text
+        except Exception as e:
+            self.logger.debug(f"获取元素文本失败: {e}")
+            return ""
+    
+    async def wait_for_element(self, selector: str, timeout: int = 10):
         """
         等待元素出现
         
         Args:
-            selector: CSS选择器
-            timeout: 超时时间(毫秒)
+            selector: 选择器(XPath或CSS)
+            timeout: 超时时间(秒)
             
         Returns:
-            bool: 元素是否出现
+            元素对象或None
         """
         try:
-            if not self.page:
-                return False
-                
-            await self.page.waitForSelector(selector, {'timeout': timeout})
-            return True
+            # 尝试使用XPath查找
+            element = await self.query_element(selector, timeout=timeout, raise_exc=False)
+            if element:
+                return element
             
+            # 如果XPath失败，尝试其他查找方式
+            # 这里可以根据selector的格式判断是XPath还是CSS选择器
+            if selector.startswith('/') or selector.startswith('./'):
+                # XPath格式
+                return await self.query_element(selector, timeout=timeout, raise_exc=False)
+            else:
+                # 可能是CSS选择器
+                return await self.find_element(css=selector)
+                
         except Exception as e:
             self.logger.debug(f"等待元素超时 {selector}: {e}")
-            return False
-    
-    async def click_element(self, selector: str) -> bool:
-        """
-        点击元素
-        
-        Args:
-            selector: CSS选择器
-            
-        Returns:
-            bool: 点击是否成功
-        """
-        try:
-            if not self.page:
-                return False
-                
-            await self.page.click(selector)
-            self.logger.debug(f"点击元素: {selector}")
-            return True
-            
-        except Exception as e:
-            self.logger.error(f"点击元素失败 {selector}: {e}")
-            return False
-    
-    async def get_page_content(self) -> Optional[str]:
-        """
-        获取页面HTML内容
-        
-        Returns:
-            Optional[str]: 页面HTML内容
-        """
-        try:
-            if not self.page:
-                return None
-                
-            content = await self.page.content()
-            return content
-            
-        except Exception as e:
-            self.logger.error(f"获取页面内容失败: {e}")
             return None
-    
-    async def evaluate_js(self, script: str) -> Any:
-        """
-        执行JavaScript代码
-        
-        Args:
-            script: JavaScript代码
-            
-        Returns:
-            Any: 执行结果
-        """
-        try:
-            if not self.page:
-                return None
-                
-            result = await self.page.evaluate(script)
-            return result
-            
-        except Exception as e:
-            self.logger.error(f"执行JavaScript失败: {e}")
-            return None
-    
-    async def take_screenshot(self, filepath: str) -> bool:
-        """
-        截取屏幕截图
-        
-        Args:
-            filepath: 截图保存路径
-            
-        Returns:
-            bool: 截图是否成功
-        """
-        try:
-            if not self.page:
-                return False
-                
-            await self.page.screenshot({'path': filepath})
-            self.logger.info(f"截图已保存: {filepath}")
-            return True
-            
-        except Exception as e:
-            self.logger.error(f"截图失败 {filepath}: {e}")
-            return False
     
     async def close(self):
-        """关闭浏览器实例"""
+        """关闭浏览器"""
         try:
-            if self.page:
-                await self.page.close()
-                self.page = None
-                
             if self.browser:
-                await self.browser.close()
+                await self.browser.__aexit__(None, None, None)
                 self.browser = None
-                
-            self._is_running = False
-            self.logger.info("浏览器已关闭")
-            
+                self.tab = None
+                self._is_running = False
+                self.logger.info("浏览器已关闭")
         except Exception as e:
             self.logger.error(f"关闭浏览器时出错: {e}")
     
@@ -285,18 +249,19 @@ class BrowserManager:
 
 
 # 便捷函数
-async def create_browser(headless: bool = True, timeout: int = 30000) -> BrowserManager:
+async def create_browser(headless: bool = True, download_dir: str = "./downloads", timeout: int = 30000) -> BrowserManager:
     """
     创建并启动浏览器实例的便捷函数
     
     Args:
         headless: 是否无头模式
+        download_dir: 下载目录
         timeout: 超时时间
         
     Returns:
         BrowserManager: 浏览器管理器实例
     """
-    browser_manager = BrowserManager(headless=headless, timeout=timeout)
+    browser_manager = BrowserManager(headless=headless, download_dir=download_dir, timeout=timeout)
     if await browser_manager.start():
         return browser_manager
     else:
@@ -307,10 +272,10 @@ if __name__ == "__main__":
     # 测试代码
     async def test_browser():
         async with BrowserManager(headless=False) as browser:
-            await browser.navigate_to("https://www.example.com")
-            content = await browser.get_page_content()
+            tab = await browser.go_to_with_captcha_bypass("https://www.example.com")
+            content = await browser.get_element_text(tab)
             if content:
-                print(f"页面标题: {content[:100]}...")
+                print(f"页面内容: {content[:100]}...")
     
     # 运行测试
     asyncio.run(test_browser())

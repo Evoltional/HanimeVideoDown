@@ -12,21 +12,6 @@ from PyQt5.QtCore import QThread, pyqtSignal
 from ToolPart.BrowserManager import BrowserManager
 
 
-def _sanitize_filename(filename: str) -> str:
-    """
-    清理文件名，移除非法字符
-    """
-    # 替换Windows/Linux不支持的字符
-    invalid_chars = '<>:"/\\|?*'
-    for char in invalid_chars:
-        filename = filename.replace(char, '_')
-
-    # 解码URL编码的字符（如果有）
-    filename = unquote(filename)
-
-    return filename
-
-
 class VideoDownloader:
     def __init__(self, download_dir="./downloads", max_retries=3, headless=True):
         self.download_dir = download_dir
@@ -34,6 +19,21 @@ class VideoDownloader:
         self.headless = headless
         # 确保下载目录存在
         os.makedirs(self.download_dir, exist_ok=True)
+    
+    @staticmethod
+    def _sanitize_filename(filename: str) -> str:
+        """
+        清理文件名，移除非法字符
+        """
+        # 替换Windows/Linux不支持的字符
+        invalid_chars = '<>:"/\\|?*'
+        for char in invalid_chars:
+            filename = filename.replace(char, '_')
+
+        # 解码URL编码的字符（如果有）
+        filename = unquote(filename)
+
+        return filename
 
     async def _check_pause(self, worker) -> bool:
         """检查暂停状态，如果暂停则等待"""
@@ -152,7 +152,7 @@ class VideoDownloader:
             return False
 
         # 清理文件名，移除非法字符
-        safe_filename = _sanitize_filename(filename)
+        safe_filename = self._sanitize_filename(filename)
 
         # 添加下载中前缀
         downloading_filename = f"下载中_{safe_filename}"
