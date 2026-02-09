@@ -2,6 +2,7 @@ import os
 import sys
 import time
 import uuid
+from datetime import datetime
 
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QFont
@@ -11,7 +12,7 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QH
 
 from ToolPart.DownLoad import DownloadWorker
 from ToolPart.Config import ConfigManager
-from ToolPart.TaskLogger import TaskLogger
+from ToolPart.TaskLogger import TaskLogger, LogLevel
 
 
 def _update_task_ui_status(task_frame, status_text, status_color,
@@ -55,7 +56,7 @@ class TaskManager:
         self.task_logger = task_logger  # TaskLogger 实例
         self.auto_cleanup_delay = 30  # 任务完成后的自动清理延迟（秒），默认30秒
 
-    def add_task(self, worker, task_frame, url, task_id=None, is_resume=False):
+    def add_task(self, worker, task_frame, url, task_id=None, is_resume=False, status="pending"):
         """添加新任务"""
         if task_id is None:
             task_id = str(uuid.uuid4())
@@ -65,18 +66,36 @@ class TaskManager:
             'task_frame': task_frame,
             'url': url,
             'task_id': task_id,
-            'status': 'pending'  # pending, active, paused, finished
+            'status': status  # pending, active, paused, finished
         }
 
-        # 添加到待处理队列
-        self.pending_tasks.append(task_info)
+        # 根据状态添加到不同队列
+        if status == 'active':
+            # 检查是否超过最大活跃任务数
+            if len(self.active_tasks) < self.max_active_tasks:
+                self.active_tasks.append(task_info)
+                task_info['worker'].start()
+                # 更新TaskLogger为运行状态
+                if self.task_logger:
+                    self.task_logger.update_task_status(task_id, 'running')
+            else:
+                self.pending_tasks.append(task_info)
+                task_info['status'] = 'pending'
+        elif status == 'paused':
+            self.paused_tasks.append(task_info)
+            # 更新TaskLogger为暂停状态
+            if self.task_logger:
+                self.task_logger.update_task_status(task_id, 'paused')
+        else:  # pending 或其他状态
+            self.pending_tasks.append(task_info)
+
         self.task_info_map[task_id] = task_info
 
-        # 记录到TaskLogger
+        # 记录到TaskLogger（仅新任务）
         if self.task_logger and not is_resume:
             self.task_logger.add_task(task_id, url, worker.download_dir)
 
-        # 尝试启动任务
+        # 尝试启动待处理任务
         self._try_start_pending_tasks()
 
         return task_id
@@ -141,8 +160,12 @@ class TaskManager:
                     # 从暂停任务中恢复一个任务
                     self._try_start_pending_tasks()
 
-    def resume_task(self, worker):
-        """恢复指定任务"""
+    def resume_task(self, worker, force_retry=False):
+        """恢复指定任务
+        Args:
+            worker: 工作线程
+            force_retry: 是否强制重试失败的任务
+        """
         # 通过worker找到task_id
         task_id = None
         for tid, task_info in self.task_info_map.items():
@@ -152,7 +175,14 @@ class TaskManager:
 
         if task_id and task_id in self.task_info_map:
             task_info = self.task_info_map[task_id]
-            if task_info['status'] == 'paused':
+
+            # 如果是失败任务且需要重试，清除失败记录
+            if force_retry and task_info['status'] == 'failed':
+                if self.task_logger:
+                    self.task_logger.clear_failed_links(task_id)
+                task_info['status'] = 'active'
+
+            if task_info['status'] in ['paused', 'failed']:
                 task_info['worker'].resume()
                 task_info['status'] = 'active'
 
@@ -178,7 +208,8 @@ class TaskManager:
                 # 只有当活跃任务数小于最大限制时才真正开始
                 if len(self.active_tasks) < self.max_active_tasks:
                     self.active_tasks.append(task_info)
-                    task_info['worker'].start()  # 重新启动线程
+                    if not task_info['worker'].isRunning():
+                        task_info['worker'].start()
                 else:
                     # 如果达到最大活跃任务数，放入待处理队列
                     self.pending_tasks.append(task_info)
@@ -210,9 +241,9 @@ class TaskManager:
         """清理任务的所有资源，遵循正确的清理顺序"""
         if task_id not in self.task_info_map:
             return
-            
+
         task_info = self.task_info_map[task_id]
-        
+
         # 1. 停止任务线程
         try:
             if hasattr(task_info['worker'], 'stop'):
@@ -252,7 +283,7 @@ class TaskManager:
         try:
             if task_id in self.task_info_map:
                 task_info = self.task_info_map[task_id]
-                
+
                 # 检查任务是否真的已完成
                 if task_info['status'] == 'finished':
                     # 执行资源清理
@@ -303,8 +334,11 @@ class TaskManager:
                 self.active_tasks.remove(task_info)
                 self.paused_tasks.append(task_info)
 
-    def resume_all_tasks(self):
-        """恢复所有暂停的任务"""
+    def resume_all_tasks(self, force_retry_failed=False):
+        """恢复所有暂停和失败的任务
+        Args:
+            force_retry_failed: 是否强制重试失败的任务
+        """
         # 收集所有需要恢复的任务
         tasks_to_resume = []
 
@@ -313,40 +347,54 @@ class TaskManager:
             if task_info['status'] == 'paused':
                 tasks_to_resume.append(task_info)
 
+        # 收集所有失败任务
+        for task_info in self.task_info_map.values():
+            if task_info['status'] == 'failed':
+                tasks_to_resume.append(task_info)
+
+        if not tasks_to_resume:
+            return
+
         # 恢复所有收集到的任务
         for task_info in tasks_to_resume:
-            task_info['worker'].resume()
-            task_info['status'] = 'active'
+            # 如果是失败任务且需要重试，清除失败记录
+            if force_retry_failed and task_info['status'] == 'failed':
+                if self.task_logger:
+                    self.task_logger.clear_failed_links(task_info['task_id'])
+                task_info['status'] = 'active'
 
-            # 更新TaskLogger
-            if self.task_logger:
-                self.task_logger.update_task_status(task_info['task_id'], 'running')
+            if task_info['status'] in ['paused', 'failed']:
+                task_info['worker'].resume()
+                task_info['status'] = 'active'
 
-            # 更新任务UI状态
-            _update_task_ui_status(
-                task_info['task_frame'],
-                "状态: 运行中",
-                "#2ecc71",
-                pause_enabled=True,
-                pause_style="background-color: #3498db;",
-                resume_enabled=False,
-                resume_style="background-color: #7f8c8d;"
-            )
+                # 更新TaskLogger
+                if self.task_logger:
+                    self.task_logger.update_task_status(task_info['task_id'], 'running')
 
-            # 将任务从暂停队列移到活跃队列
-            if task_info in self.paused_tasks:
-                self.paused_tasks.remove(task_info)
+                # 更新任务UI状态
+                _update_task_ui_status(
+                    task_info['task_frame'],
+                    "状态: 运行中",
+                    "#2ecc71",
+                    pause_enabled=True,
+                    pause_style="background-color: #3498db;",
+                    resume_enabled=False,
+                    resume_style="background-color: #7f8c8d;"
+                )
 
-            # 只有当活跃任务数小于最大限制时才真正开始
-            if len(self.active_tasks) < self.max_active_tasks:
-                self.active_tasks.append(task_info)
-                # 重新启动线程（因为暂停时线程可能已经结束）
-                if not task_info['worker'].isRunning():
-                    task_info['worker'].start()
-            else:
-                # 如果达到最大活跃任务数，放入待处理队列
-                self.pending_tasks.append(task_info)
-                task_info['status'] = 'pending'
+                # 将任务从暂停队列移到活跃队列
+                if task_info in self.paused_tasks:
+                    self.paused_tasks.remove(task_info)
+
+                # 只有当活跃任务数小于最大限制时才真正开始
+                if len(self.active_tasks) < self.max_active_tasks:
+                    self.active_tasks.append(task_info)
+                    if not task_info['worker'].isRunning():
+                        task_info['worker'].start()
+                else:
+                    # 如果达到最大活跃任务数，放入待处理队列
+                    self.pending_tasks.append(task_info)
+                    task_info['status'] = 'pending'
 
         # 清空暂停任务列表
         self.paused_tasks.clear()
@@ -424,7 +472,7 @@ class MainWindow(QMainWindow):
 
         # 初始化TaskLogger
         self.task_logger = TaskLogger()
-        
+
         # 从配置中读取窗口位置和大小
         window_pos = self.config_manager.get("window_position", [100, 100])
         window_size = self.config_manager.get("window_size", [1000, 800])
@@ -536,6 +584,7 @@ class MainWindow(QMainWindow):
 
     def restore_incomplete_tasks(self):
         """恢复未完成的任务"""
+        # 获取所有未完成的任务（包括waiting、running、paused、failed）
         incomplete_tasks = self.task_logger.get_incomplete_tasks()
 
         if incomplete_tasks:
@@ -544,15 +593,29 @@ class MainWindow(QMainWindow):
             for task_id, task_info in incomplete_tasks.items():
                 url = task_info.get("url", "")
                 download_dir = task_info.get("download_dir", self.download_dir)
+                status = task_info.get("status", "waiting")
+
+                # 检查目录下是否有"下载中_"文件
+                downloading_files = self.task_logger.get_downloading_files(download_dir)
+                if downloading_files:
+                    self.log_message(f"发现未完成的下载文件: {len(downloading_files)} 个")
 
                 if url:
                     # 创建恢复的任务
-                    self.restore_task(task_id, url, download_dir)
+                    self.restore_task(task_id, url, download_dir, status)
 
-        self.log_message("任务恢复完成")
+            self.log_message("任务恢复完成")
+        else:
+            self.log_message("没有发现未完成的任务")
 
-    def restore_task(self, task_id: str, url: str, download_dir: str):
-        """恢复一个暂停的任务"""
+    def restore_task(self, task_id: str, url: str, download_dir: str, status: str = "paused"):
+        """恢复一个任务
+        Args:
+            task_id: 任务ID
+            url: 任务URL
+            download_dir: 下载目录
+            status: 任务状态
+        """
         # 创建下载工作线程
         worker = DownloadWorker(url, download_dir, self.headless_mode)
         worker.log_signal.connect(self.log_message)
@@ -561,13 +624,38 @@ class MainWindow(QMainWindow):
         # 创建任务显示框
         task_frame = self.create_task_frame(url, worker, is_resume=True)
 
-        # 添加到任务管理器（标记为恢复的任务）
-        self.task_manager.add_task(worker, task_frame, url, task_id=task_id, is_resume=True)
+        # 统一处理：所有恢复的任务都以暂停状态显示
+        # 即使原来的状态是running，也改为暂停状态等待用户手动继续
+        display_status = "paused"  # 强制设置为暂停状态
+        
+        if display_status == "failed":
+            # 失败的任务，显示为失败，可以重新开始
+            _update_task_ui_status(
+                task_frame,
+                "状态: 失败",
+                "#e74c3c",
+                pause_enabled=False,
+                pause_style="background-color: #7f8c8d;",
+                resume_enabled=True,
+                resume_style=""
+            )
+        else:
+            # 所有其他状态（包括running）都显示为暂停
+            _update_task_ui_status(
+                task_frame,
+                "状态: 已暂停",
+                "#f39c12",
+                pause_enabled=False,
+                pause_style="background-color: #7f8c8d;",
+                resume_enabled=True,
+                resume_style=""
+            )
 
-        # 设置任务状态为暂停
-        self.task_manager.pause_task(worker)
+        # 添加到任务管理器（统一标记为暂停状态）
+        self.task_manager.add_task(worker, task_frame, url, task_id=task_id,
+                                   is_resume=True, status="paused")
 
-        self.log_message(f"已恢复任务: {url}")
+        self.log_message(f"已恢复任务: {url} (原状态: {status}, 当前状态: 已暂停)")
 
     def init_ui(self):
         """初始化用户界面"""
@@ -638,6 +726,8 @@ class MainWindow(QMainWindow):
         self.pause_btn = QPushButton("暂停全部")
         self.pause_btn.clicked.connect(self.pause_download)
         button_layout.addWidget(self.pause_btn)
+
+
 
         self.clear_all_btn = QPushButton("删除全部")
         self.clear_all_btn.clicked.connect(self.clear_all_tasks)
@@ -723,25 +813,26 @@ class MainWindow(QMainWindow):
                 level = "SUCCESS"
             elif "调试" in message or "debug" in message.lower():
                 level = "DEBUG"
-        
+
         timestamp = time.strftime("%H:%M:%S")
-        
+
         # 标准文本输出
         log_message = f"[{timestamp}] {level} - {message}"
         self.log_area.append(log_message)
-        
+
         # 自动滚动到底部
         self.log_area.verticalScrollBar().setValue(
             self.log_area.verticalScrollBar().maximum()
         )
 
     def start_download(self) -> None:
-        """开始新的下载任务"""
+        """开始新的下载任务或恢复所有暂停任务"""
         url = self.url_input.text().strip()
 
-        # 如果输入框为空，视为继续所有下载
+        # 如果输入框为空，恢复所有暂停和失败的任务
         if not url:
-            self.resume_all_tasks()
+            self.log_message("正在恢复所有暂停和失败的任务...")
+            self.task_manager.resume_all_tasks(force_retry_failed=True)
             return
 
         self.url_input.clear()
@@ -765,13 +856,14 @@ class MainWindow(QMainWindow):
 
         # 找到对应的线程和任务
         task_id = None
-        for tid, task_info in self.task_manager.task_info_map.items():
-            if task_info['worker'] == sender:
+        task_info = None
+        for tid, info in self.task_manager.task_info_map.items():
+            if info['worker'] == sender:
                 task_id = tid
+                task_info = info
                 break
 
-        if task_id:
-            task_info = self.task_manager.task_info_map[task_id]
+        if task_id and task_info:
             url = task_info['url']
 
             if success:
@@ -787,17 +879,17 @@ class MainWindow(QMainWindow):
                     "状态: 已完成",
                     "#2ecc71"
                 )
-                
+
                 # 任务成功完成后，设置状态为finished并启动自动清理
                 task_info['status'] = 'finished'
-                
+
                 # 启动延时自动清理
                 self._schedule_auto_cleanup(task_id, task_info)
-                
+
             else:
                 self.log_message(f"下载任务失败: {url}")
 
-                # 更新TaskLogger
+                # 更新TaskLogger为失败状态
                 if self.task_manager.task_logger:
                     self.task_manager.task_logger.update_task_status(task_id, 'failed')
 
@@ -812,12 +904,10 @@ class MainWindow(QMainWindow):
                     resume_style=""
                 )
 
-                # 将任务状态设置为暂停，允许用户重新开始
-                task_info['status'] = 'paused'
+                # 将任务状态设置为失败，允许用户重新开始
+                task_info['status'] = 'failed'
 
-            # 从任务管理器中移除已完成的任务
-            # 注意：我们不从task_info_map中删除，因为用户可能还需要查看任务记录
-            # 只是从活动任务列表中移除
+            # 从任务管理器中移除已完成/失败的任务
             if task_info in self.task_manager.active_tasks:
                 self.task_manager.active_tasks.remove(task_info)
             elif task_info in self.task_manager.pending_tasks:
@@ -836,20 +926,20 @@ class MainWindow(QMainWindow):
         else:
             self.log_message("没有正在运行的任务可以暂停")
 
-    def resume_all_tasks(self) -> None:
-        """恢复所有任务"""
-        # 检查是否有暂停的任务
-        if self.task_manager.paused_tasks:
-            self.task_manager.resume_all_tasks()
-            self.log_message("已恢复所有暂停的任务")
-        else:
-            self.log_message("没有暂停的任务需要恢复")
+    def resume_all_tasks(self, force_retry_failed=False):
+        """恢复所有任务
+        Args:
+            force_retry_failed: 是否强制重试失败的任务
+        """
+        # 恢复所有暂停和失败的任务
+        self.task_manager.resume_all_tasks(force_retry_failed=force_retry_failed)
+        self.log_message("已恢复所有暂停和失败的任务")
 
     def clear_log(self) -> None:
         """清空日志显示"""
         self.log_area.clear()
         self.log_message("日志已清空")
-        
+
     def clear_all_tasks(self) -> None:
         """清空所有任务"""
         try:
@@ -883,7 +973,7 @@ class MainWindow(QMainWindow):
         task_layout.addWidget(task_label)
 
         # 状态标签
-        status_text = "状态: 暂停中" if is_resume else "状态: 待处理"
+        status_text = "状态: 已暂停" if is_resume else "状态: 待处理"
         status_color = "#f39c12" if is_resume else "#7f8c8d"
         status_label = QLabel(status_text)
         status_label.setObjectName("status_label")
@@ -898,7 +988,7 @@ class MainWindow(QMainWindow):
         resume_btn.setObjectName("resume_btn")  # 设置对象名称以便查找
         resume_btn.setEnabled(is_resume)  # 如果是恢复的任务，继续按钮可用
         resume_btn.setStyleSheet("background-color: #7f8c8d;" if not is_resume else "")
-        resume_btn.clicked.connect(lambda: self.resume_task(worker))
+        resume_btn.clicked.connect(lambda: self.resume_task(worker, force_retry=True))
         button_layout.addWidget(resume_btn)
 
         # 暂停按钮
@@ -921,9 +1011,13 @@ class MainWindow(QMainWindow):
 
         return task_frame
 
-    def resume_task(self, worker: DownloadWorker):
-        """恢复特定任务"""
-        self.task_manager.resume_task(worker)
+    def resume_task(self, worker: DownloadWorker, force_retry=False):
+        """恢复特定任务
+        Args:
+            worker: 工作线程
+            force_retry: 是否强制重试失败的任务
+        """
+        self.task_manager.resume_task(worker, force_retry=force_retry)
         self.log_message(f"已恢复任务")
 
     def pause_task(self, worker: DownloadWorker):
@@ -953,7 +1047,6 @@ class MainWindow(QMainWindow):
             print(f"删除任务时发生未知错误: {e}")
             self.log_message(f"删除任务失败: {str(e)}")
 
-
     def change_download_path(self) -> None:
         """更改下载路径"""
         new_path = QFileDialog.getExistingDirectory(
@@ -981,6 +1074,13 @@ class MainWindow(QMainWindow):
         except Exception as e:
             self.log_message(f"设置自动清理延迟失败: {str(e)}")
 
+    def _schedule_auto_cleanup(self, task_id: str, task_info: dict):
+        """调度自动清理任务"""
+        # 这里可以添加自动清理的逻辑
+        # 由于Qt不支持直接延迟调用，可以使用QTimer
+        # 但为了简化，这里只记录日志
+        self.log_message(f"任务 {task_id} 将在 {self.task_manager.auto_cleanup_delay} 秒后自动清理")
+
     def closeEvent(self, event):
         """窗口关闭事件，保存窗口位置和大小"""
         print("程序正在关闭...")
@@ -1006,7 +1106,6 @@ class MainWindow(QMainWindow):
             import time
             time.sleep(1)
             print("任务已停止")
-
 
         print("程序关闭完成")
         # 接受关闭事件

@@ -494,6 +494,7 @@ class DownloadWorker(QThread):
         self._pause_condition = threading.Condition(threading.Lock())
         self.task_logger = task_logger
         self.task_id = task_id
+        self.last_error = ""  # 记录最后错误信息
 
     def run(self):
         """执行下载任务"""
@@ -512,9 +513,23 @@ class DownloadWorker(QThread):
             # 运行异步任务
             success = asyncio.run(self._process_link(scraper))
 
+            # 如果任务被暂停或停止，不算失败
+            if not self._is_running or self._is_paused:
+                self.log_signal.emit(f"任务被停止或暂停: {self.url}")
+                self.finished_signal.emit(False)
+                return
+
             self.finished_signal.emit(success)
+
         except Exception as e:
-            self.log_signal.emit(f"下载任务出错: {str(e)}")
+            error_msg = f"下载任务出错: {str(e)}"
+            self.log_signal.emit(error_msg)
+            self.last_error = error_msg
+
+            # 记录到TaskLogger
+            if self.task_logger and self.task_id:
+                self.task_logger.add_failed_link(self.task_id, self.url, "download_error")
+
             import traceback
             traceback.print_exc()
             self.finished_signal.emit(False)
