@@ -3,7 +3,7 @@ import os
 import queue
 import threading
 import time
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Dict
 from urllib.parse import unquote
 
 import requests
@@ -19,7 +19,13 @@ class VideoDownloader:
         self.headless = headless
         # 确保下载目录存在
         os.makedirs(self.download_dir, exist_ok=True)
-    
+        # 进度报告回调函数
+        self.progress_callback = None
+
+    def set_progress_callback(self, callback):
+        """设置进度回调函数"""
+        self.progress_callback = callback
+
     @staticmethod
     def _sanitize_filename(filename: str) -> str:
         """
@@ -34,10 +40,16 @@ class VideoDownloader:
         filename = unquote(filename)
 
         return filename
-    
+
+    def _format_size(self, size_bytes: int) -> str:
+        """格式化文件大小"""
+        if size_bytes < 1024 * 1024:  # 小于1MB
+            return f"{size_bytes / 1024:.1f} KB"
+        else:
+            return f"{size_bytes / (1024 * 1024):.1f} MB"
+
     def standard_print(self, level: str, message: str) -> None:
-        """标准控
-        制台输出"""
+        """标准控制台输出"""
         timestamp = time.strftime("%H:%M:%S")
         print(f"[{timestamp}] {level.upper()} - {message}")
 
@@ -223,7 +235,19 @@ class VideoDownloader:
                             # 显示下载进度
                             if total_size > 0:
                                 progress = (downloaded_size / total_size) * 100
-                                print(f"\r下载进度: {progress:.1f}% ({downloaded_size}/{total_size} bytes)", end='')
+                                progress_str = f"{progress:.1f}% ({self._format_size(downloaded_size)}/{self._format_size(total_size)})"
+
+                                # 报告进度
+                                if self.progress_callback:
+                                    self.progress_callback(safe_filename, progress_str)
+
+                                print(f"\r{safe_filename}: {progress_str}", end='')
+                            else:
+                                # 如果没有总大小信息，显示已下载大小
+                                if self.progress_callback:
+                                    self.progress_callback(safe_filename, f"{self._format_size(downloaded_size)}")
+
+                                print(f"\r{safe_filename}: {self._format_size(downloaded_size)}", end='')
 
                 self.standard_print("INFO", "\n下载完成，正在重命名文件...")
 
@@ -231,6 +255,11 @@ class VideoDownloader:
                 try:
                     os.rename(downloading_file_path, final_file_path)
                     self.standard_print("SUCCESS", f"文件重命名完成: {final_file_path}")
+
+                    # 下载完成后报告100%进度
+                    if self.progress_callback and total_size > 0:
+                        self.progress_callback(safe_filename,
+                                               f"100.0% ({self._format_size(total_size)}/{self._format_size(total_size)})")
                 except Exception as e:
                     self.standard_print("ERROR", f"文件重命名失败: {e}")
                     return False
@@ -286,7 +315,10 @@ class HanimeScraper:
         self.results = []
         self.active_threads = 0
         self.lock = threading.Lock()
-        
+
+        # 正在下载的文件进度字典
+        self.downloading_files = {}  # 格式: {filename: progress_str}
+
         # 标准日志输出，无颜色映射
 
     async def check_pause(self, worker) -> bool:
@@ -294,7 +326,7 @@ class HanimeScraper:
         if worker and hasattr(worker, 'should_pause'):
             return worker.should_pause()
         return False
-    
+
     def standard_print(self, level: str, message: str) -> None:
         """标准控制台输出"""
         timestamp = time.strftime("%H:%M:%S")
@@ -321,17 +353,17 @@ class HanimeScraper:
 
             # 首先定位到playlist-scroll容器
             playlist_container = await browser.query_element('//*[@id="playlist-scroll"]', timeout=10, raise_exc=False)
-            
+
             if playlist_container:
                 # 在playlist-scroll容器内查找所有带有href属性的链接元素
                 # 使用完整的XPath限定在playlist-scroll范围内
                 link_elements = await browser.find_element(
-                    xpath='//*[@id="playlist-scroll"]//a[@href]', 
-                    find_all=True, 
-                    timeout=10, 
+                    xpath='//*[@id="playlist-scroll"]//a[@href]',
+                    find_all=True,
+                    timeout=10,
                     raise_exc=False
                 )
-                
+
                 if link_elements:
                     for element in link_elements:
                         # 在处理每个元素前检查暂停状态
@@ -344,7 +376,7 @@ class HanimeScraper:
                             href = await element.get_attribute('href')
                         except:
                             href = element.get_attribute('href')
-                        
+
                         if href and isinstance(href, str) and href.startswith('https://hanime1.me/watch?v='):
                             # 只添加hanime1.me的视频链接，过滤掉其他链接
                             self.all_video_links.add(href)
@@ -359,12 +391,29 @@ class HanimeScraper:
                     self.standard_print("INFO", f"  {i}. {link}")
             else:
                 self.standard_print("WARNING", "未获取到任何视频链接")
-            
+
             # 记录到TaskLogger
             if self.task_logger and self.task_id:
                 self.task_logger.add_video_links(self.task_id, video_links_list)
 
             return video_links_list
+
+    def update_progress(self, filename: str, progress: str):
+        """更新下载进度"""
+        self.downloading_files[filename] = progress
+
+    def get_progress_text(self) -> str:
+        """获取进度文本，格式化为多行"""
+        if not self.downloading_files:
+            return "等待开始..."
+
+        progress_lines = []
+        for filename, progress in self.downloading_files.items():
+            # 简化文件名显示，只显示前20个字符
+            display_name = filename[:20] + "..." if len(filename) > 20 else filename
+            progress_lines.append(f"{display_name}: {progress}")
+
+        return "\n".join(progress_lines)
 
     async def process_single_link(self, video_url: str, worker=None) -> bool:
         """处理单个视频链接，提取下载链接并下载"""
@@ -412,6 +461,12 @@ class HanimeScraper:
                             download_href, worker, self.task_logger, self.task_id
                         )
 
+                        # 下载完成后从正在下载的文件中移除
+                        if hasattr(worker, 'get_current_filename'):
+                            filename = worker.get_current_filename()
+                            if filename and filename in self.downloading_files:
+                                del self.downloading_files[filename]
+
                         return success
                     else:
                         self.standard_print("WARNING", f"✗ 未找到下载链接: {video_url}")
@@ -451,7 +506,7 @@ class HanimeScraper:
     async def process_links_batch(self, links_batch: List[str], worker=None) -> None:
         """批量处理链接，使用多线程顺序处理"""
         self.standard_print("INFO", f"开始批量处理 {len(links_batch)} 个链接，使用 {self.max_workers} 个工作线程")
-        
+
         # 将链接放入队列
         for link in links_batch:
             self.link_queue.put(link)
@@ -482,7 +537,8 @@ class DownloadWorker(QThread):
     """下载工作线程"""
     log_signal = pyqtSignal(str)
     finished_signal = pyqtSignal(bool)  # 参数为下载是否成功
-    progress_signal = pyqtSignal(int)  # 添加进度信号
+    progress_signal = pyqtSignal(str)  # 进度信号，参数为进度文本
+    file_progress_signal = pyqtSignal(str, str)  # 文件进度信号，参数为(文件名, 进度)
 
     def __init__(self, url: str, download_dir: str, headless: bool, task_logger=None, task_id=None):
         super().__init__()
@@ -495,6 +551,8 @@ class DownloadWorker(QThread):
         self.task_logger = task_logger
         self.task_id = task_id
         self.last_error = ""  # 记录最后错误信息
+        self.current_filename = ""  # 当前正在下载的文件名
+        self.scraper = None  # HanimeScraper实例
 
     def run(self):
         """执行下载任务"""
@@ -502,7 +560,7 @@ class DownloadWorker(QThread):
             self.log_signal.emit(f"开始处理链接: {self.url}")
 
             # 创建scraper实例并设置参数
-            scraper = HanimeScraper(
+            self.scraper = HanimeScraper(
                 max_workers=2,  # 使用2个线程处理视频链接
                 headless=self.headless,
                 download_dir=self.download_dir,
@@ -510,8 +568,11 @@ class DownloadWorker(QThread):
                 task_id=self.task_id
             )
 
+            # 设置进度回调
+            self.scraper.downloader.set_progress_callback(self._on_progress_update)
+
             # 运行异步任务
-            success = asyncio.run(self._process_link(scraper))
+            success = asyncio.run(self._process_link(self.scraper))
 
             # 如果任务被暂停或停止，不算失败
             if not self._is_running or self._is_paused:
@@ -533,6 +594,22 @@ class DownloadWorker(QThread):
             import traceback
             traceback.print_exc()
             self.finished_signal.emit(False)
+
+    def _on_progress_update(self, filename: str, progress: str):
+        """处理进度更新"""
+        self.current_filename = filename
+        # 更新scraper中的进度
+        if self.scraper:
+            self.scraper.update_progress(filename, progress)
+            # 发送组合的进度文本
+            progress_text = self.scraper.get_progress_text()
+            self.progress_signal.emit(progress_text)
+            # 发送单个文件的进度（备用）
+            self.file_progress_signal.emit(filename, progress)
+
+    def get_current_filename(self) -> str:
+        """获取当前正在下载的文件名"""
+        return self.current_filename
 
     async def _process_link(self, scraper: HanimeScraper):
         """异步处理单个链接"""

@@ -8,7 +8,7 @@ from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QFont
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                              QLabel, QLineEdit, QPushButton, QTextEdit, QGroupBox,
-                             QScrollArea, QFrame, QFileDialog, QCheckBox)
+                             QScrollArea, QFrame, QFileDialog, QCheckBox, QGridLayout)
 
 from ToolPart.DownLoad import DownloadWorker
 from ToolPart.Config import ConfigManager
@@ -23,7 +23,7 @@ def _update_task_ui_status(task_frame, status_text, status_color,
     status_label = task_frame.findChild(QLabel, "status_label")
     if status_label:
         status_label.setText(status_text)
-        status_label.setStyleSheet(f"color: {status_color};")
+        status_label.setStyleSheet(f"color: {status_color}; font-weight: bold; font-size: 12px;")
 
     # 更新暂停按钮
     pause_btn = task_frame.findChild(QPushButton, "pause_btn")
@@ -518,6 +518,7 @@ class MainWindow(QMainWindow):
                 border-radius: 5px;
                 padding: 8px 16px;
                 font-weight: bold;
+                font-size: 12px;
             }
             QPushButton:hover {
                 background-color: #2980b9;
@@ -620,6 +621,7 @@ class MainWindow(QMainWindow):
         worker = DownloadWorker(url, download_dir, self.headless_mode)
         worker.log_signal.connect(self.log_message)
         worker.finished_signal.connect(self.on_download_finished)
+        worker.progress_signal.connect(lambda progress, w=worker: self.update_task_progress(w, progress))
 
         # 创建任务显示框
         task_frame = self.create_task_frame(url, worker, is_resume=True)
@@ -627,7 +629,7 @@ class MainWindow(QMainWindow):
         # 统一处理：所有恢复的任务都以暂停状态显示
         # 即使原来的状态是running，也改为暂停状态等待用户手动继续
         display_status = "paused"  # 强制设置为暂停状态
-        
+
         if display_status == "failed":
             # 失败的任务，显示为失败，可以重新开始
             _update_task_ui_status(
@@ -727,8 +729,6 @@ class MainWindow(QMainWindow):
         self.pause_btn.clicked.connect(self.pause_download)
         button_layout.addWidget(self.pause_btn)
 
-
-
         self.clear_all_btn = QPushButton("删除全部")
         self.clear_all_btn.clicked.connect(self.clear_all_tasks)
         button_layout.addWidget(self.clear_all_btn)
@@ -757,7 +757,7 @@ class MainWindow(QMainWindow):
         self.tasks_container.setObjectName("tasks_container")
         self.tasks_layout = QVBoxLayout(self.tasks_container)
         self.tasks_layout.setAlignment(Qt.AlignTop)
-        self.tasks_layout.setSpacing(5)
+        self.tasks_layout.setSpacing(8)
         self.tasks_layout.setContentsMargins(5, 5, 5, 5)
 
         self.tasks_scroll.setWidget(self.tasks_container)
@@ -841,12 +841,13 @@ class MainWindow(QMainWindow):
         worker = DownloadWorker(url, self.download_dir, self.headless_mode)
         worker.log_signal.connect(self.log_message)
         worker.finished_signal.connect(self.on_download_finished)
+        worker.progress_signal.connect(lambda progress, w=worker: self.update_task_progress(w, progress))
 
         # 创建任务显示框
         task_frame = self.create_task_frame(url, worker)
 
         # 添加到任务管理器
-        self.task_manager.add_task(worker, task_frame, url)
+        task_id = self.task_manager.add_task(worker, task_frame, url)
 
         self.log_message(f"已添加下载任务: {url} (状态: 待处理)")
 
@@ -880,6 +881,16 @@ class MainWindow(QMainWindow):
                     "#2ecc71"
                 )
 
+                # 清空进度显示
+                progress_frame = task_info['task_frame'].findChild(QFrame, "progress_frame")
+                if progress_frame:
+                    left_progress = progress_frame.findChild(QLabel, "left_progress")
+                    right_progress = progress_frame.findChild(QLabel, "right_progress")
+                    if left_progress:
+                        left_progress.setText("下载完成")
+                    if right_progress:
+                        right_progress.setText("")
+
                 # 任务成功完成后，设置状态为finished并启动自动清理
                 task_info['status'] = 'finished'
 
@@ -904,6 +915,13 @@ class MainWindow(QMainWindow):
                     resume_style=""
                 )
 
+                # 更新进度显示
+                progress_frame = task_info['task_frame'].findChild(QFrame, "progress_frame")
+                if progress_frame:
+                    left_progress = progress_frame.findChild(QLabel, "left_progress")
+                    if left_progress:
+                        left_progress.setText("下载失败")
+
                 # 将任务状态设置为失败，允许用户重新开始
                 task_info['status'] = 'failed'
 
@@ -917,6 +935,44 @@ class MainWindow(QMainWindow):
 
             # 尝试启动等待中的任务
             self.task_manager._try_start_pending_tasks()
+
+    def update_task_progress(self, worker, progress_text: str):
+        """更新任务进度显示"""
+        # 通过worker找到对应的task_frame
+        task_frame = None
+        for task_info in self.task_manager.task_info_map.values():
+            if task_info['worker'] == worker:
+                task_frame = task_info['task_frame']
+                break
+
+        if task_frame:
+            # 解析进度文本，按行分割
+            progress_lines = progress_text.split('\n')
+
+            # 获取进度框架和标签
+            progress_frame = task_frame.findChild(QFrame, "progress_frame")
+            if not progress_frame:
+                return
+
+            left_progress = progress_frame.findChild(QLabel, "left_progress")
+            right_progress = progress_frame.findChild(QLabel, "right_progress")
+
+            if not left_progress or not right_progress:
+                return
+
+            # 根据进度行数更新显示
+            if len(progress_lines) == 1:
+                # 只有一个任务，显示在左侧
+                left_progress.setText(progress_lines[0])
+                right_progress.setText("")
+            elif len(progress_lines) >= 2:
+                # 有两个任务，左右各显示一个
+                left_progress.setText(progress_lines[0])
+                right_progress.setText(progress_lines[1])
+            else:
+                # 没有进度信息
+                left_progress.setText("等待开始...")
+                right_progress.setText("")
 
     def pause_download(self) -> None:
         """暂停所有下载任务"""
@@ -965,36 +1021,73 @@ class MainWindow(QMainWindow):
         task_frame = QFrame()
         task_frame.setFrameShape(QFrame.StyledPanel)
         task_layout = QVBoxLayout(task_frame)
+        task_layout.setSpacing(8)
+        task_layout.setContentsMargins(10, 10, 10, 10)
 
-        # 任务标签
-        task_label = QLabel(f"任务: {url}")
-        task_label.setStyleSheet("color: #ecf0f1; font-weight: bold;")
+        # 第一行：URL和状态
+        first_row_layout = QHBoxLayout()
+
+        # URL标签（左边）
+        url_text = url
+        if len(url) > 50:
+            url_text = url[:47] + "..."
+        task_label = QLabel(f"URL: {url_text}")
+        task_label.setStyleSheet("color: #ecf0f1; font-weight: bold; font-size: 12px;")
         task_label.setWordWrap(True)
-        task_layout.addWidget(task_label)
+        first_row_layout.addWidget(task_label, 1)  # 占据剩余空间
 
-        # 状态标签
+        # 状态标签（右边）
         status_text = "状态: 已暂停" if is_resume else "状态: 待处理"
         status_color = "#f39c12" if is_resume else "#7f8c8d"
         status_label = QLabel(status_text)
         status_label.setObjectName("status_label")
-        status_label.setStyleSheet(f"color: {status_color};")
-        task_layout.addWidget(status_label)
+        status_label.setStyleSheet(f"color: {status_color}; font-weight: bold; font-size: 12px;")
+        first_row_layout.addWidget(status_label)
 
-        # 按钮布局
+        task_layout.addLayout(first_row_layout)
+
+        # 第二行：进度显示（水平分布）
+        progress_frame = QFrame()
+        progress_frame.setObjectName("progress_frame")
+        progress_layout = QHBoxLayout(progress_frame)
+        progress_layout.setSpacing(20)
+        progress_layout.setContentsMargins(5, 5, 5, 5)
+
+        # 左侧进度标签
+        left_progress = QLabel("等待开始...")
+        left_progress.setObjectName("left_progress")
+        left_progress.setStyleSheet("color: #3498db; font-weight: bold; font-size: 13px;")
+        left_progress.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        left_progress.setWordWrap(True)
+        left_progress.setMinimumHeight(30)
+        progress_layout.addWidget(left_progress, 1)  # 占据一半空间
+
+        # 右侧进度标签
+        right_progress = QLabel("")
+        right_progress.setObjectName("right_progress")
+        right_progress.setStyleSheet("color: #3498db; font-weight: bold; font-size: 13px;")
+        right_progress.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        right_progress.setWordWrap(True)
+        right_progress.setMinimumHeight(30)
+        progress_layout.addWidget(right_progress, 1)  # 占据一半空间
+
+        task_layout.addWidget(progress_frame)
+
+        # 第三行：按钮
         button_layout = QHBoxLayout()
 
         # 继续按钮
         resume_btn = QPushButton("继续")
-        resume_btn.setObjectName("resume_btn")  # 设置对象名称以便查找
-        resume_btn.setEnabled(is_resume)  # 如果是恢复的任务，继续按钮可用
+        resume_btn.setObjectName("resume_btn")
+        resume_btn.setEnabled(is_resume)
         resume_btn.setStyleSheet("background-color: #7f8c8d;" if not is_resume else "")
         resume_btn.clicked.connect(lambda: self.resume_task(worker, force_retry=True))
         button_layout.addWidget(resume_btn)
 
         # 暂停按钮
         pause_btn = QPushButton("暂停")
-        pause_btn.setObjectName("pause_btn")  # 设置对象名称以便查找
-        pause_btn.setEnabled(not is_resume)  # 如果是恢复的任务，暂停按钮不可用
+        pause_btn.setObjectName("pause_btn")
+        pause_btn.setEnabled(not is_resume)
         pause_btn.setStyleSheet("" if not is_resume else "background-color: #7f8c8d;")
         pause_btn.clicked.connect(lambda: self.pause_task(worker))
         button_layout.addWidget(pause_btn)
