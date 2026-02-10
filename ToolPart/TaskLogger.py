@@ -3,7 +3,7 @@ import os
 import threading
 from datetime import datetime
 from enum import Enum
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any
 
 
 class LogLevel(Enum):
@@ -190,32 +190,7 @@ class TaskLogger:
             with open(self.config_file, 'w', encoding='utf-8') as f:
                 json.dump({}, f, indent=4, ensure_ascii=False)
 
-    def auto_cleanup_completed_tasks(self, days_old: int = 1) -> None:
-        """自动清理已完成超过指定天数的任务"""
-        with self.lock:
-            tasks = self._load_tasks()
-            current_time = datetime.now()
 
-            tasks_to_remove = []
-
-            for task_id, task_info in tasks.items():
-                if task_info["status"] == "completed":
-                    # 解析创建时间
-                    created_at = datetime.fromisoformat(task_info["created_at"])
-                    # 计算天数差
-                    days_diff = (current_time - created_at).days
-
-                    if days_diff >= days_old:
-                        tasks_to_remove.append(task_id)
-
-            # 删除符合条件的任务
-            for task_id in tasks_to_remove:
-                del tasks[task_id]
-                self.log(LogLevel.INFO, f"已自动清理任务: {task_id}")
-
-            # 保存更新后的任务列表
-            if tasks_to_remove:
-                self._save_tasks(tasks)
 
     def _load_tasks(self) -> Dict[str, Any]:
         """加载任务数据"""

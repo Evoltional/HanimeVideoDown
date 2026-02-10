@@ -3,7 +3,7 @@ import os
 import queue
 import threading
 import time
-from typing import List, Optional, Tuple, Dict
+from typing import List, Optional, Tuple
 from urllib.parse import unquote
 
 import requests
@@ -319,7 +319,6 @@ class HanimeScraper:
         # 正在下载的文件进度字典
         self.downloading_files = {}  # 格式: {filename: progress_str}
 
-        # 标准日志输出，无颜色映射
 
     async def check_pause(self, worker) -> bool:
         """检查暂停状态，如果暂停则等待"""

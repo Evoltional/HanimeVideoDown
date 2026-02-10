@@ -137,7 +137,7 @@ class BrowserManager:
         查找元素，支持多种查找方式
         
         Args:
-            **kwargs: 查找参数，如id='element_id', class_name='class-name'等
+            **kwargs: 查找参数，如id='element_id', class_name=' class-name '等
             
         Returns:
             元素对象或None
