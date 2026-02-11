@@ -43,6 +43,9 @@ class BrowserManager:
             # 启动标签页
             self.tab = await self.browser.start()
             
+            # 启用Cloudflare自动解决功能
+            await self.tab.enable_auto_solve_cloudflare_captcha()
+            
             self._is_running = True
             self.logger.info("浏览器启动成功")
             return True
@@ -60,11 +63,8 @@ class BrowserManager:
         """
         options = ChromiumOptions()
         
-        # 基本设置
+        # 基本反检测设置（参考test.py）
         options.add_argument('--disable-blink-features=AutomationControlled')
-        options.add_argument('--no-sandbox')
-        options.add_argument('--disable-dev-shm-usage')
-        options.add_argument('--disable-gpu')
         
         # 无头模式设置
         if self.headless:
@@ -72,11 +72,6 @@ class BrowserManager:
         
         # 下载设置
         options.set_default_download_directory(self.download_dir)
-        
-        # 其他优化设置
-        options.add_argument('--disable-extensions')
-        options.add_argument('--disable-plugins')
-        options.add_argument('--disable-images')  # 可选：禁用图片加载以提高速度
         
         return options
     
@@ -94,11 +89,11 @@ class BrowserManager:
             raise RuntimeError("浏览器未启动")
         
         try:
-            # 使用上下文管理器自动处理验证码
+            # 使用上下文管理器自动处理验证码（严格按照test.py方式）
             async with self.tab.expect_and_bypass_cloudflare_captcha():
                 await self.tab.go_to(url)
             
-            self.logger.info(f"成功访问页面: {url}")
+            self.logger.info(f"成功访问页面并绕过验证码: {url}")
             return self.tab
             
         except Exception as e:
