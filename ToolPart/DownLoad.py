@@ -184,6 +184,9 @@ class VideoDownloader:
             # 记录到TaskLogger
             if task_logger and task_id:
                 task_logger.add_downloaded_video(task_id, safe_filename)
+                # 手动触发一次进度更新，使界面重新读取 TaskLogger 中的计数
+                if self.progress_callback:
+                    self.progress_callback(safe_filename, "已完成")
 
             return True
 
@@ -301,7 +304,7 @@ class VideoDownloader:
 
 
 class HanimeScraper:
-    def __init__(self, max_workers=2, headless=True, download_dir="./downloads", task_logger=None, task_id=None):
+    def __init__(self, max_workers=2, headless=True, download_dir="./downloads", task_logger=None, task_id=None, config_manager=None):
         self.all_video_links = set()
         self.download_links = []
         self.downloader = VideoDownloader(download_dir=download_dir, headless=headless)
@@ -309,6 +312,7 @@ class HanimeScraper:
         self.task_logger = task_logger
         self.task_id = task_id
         self.headless = headless  # 保存headless参数
+        self.config_manager = config_manager  # 保存配置管理器
 
         # 多线程处理队列
         self.link_queue = queue.Queue()
@@ -319,6 +323,24 @@ class HanimeScraper:
         # 正在下载的文件进度字典
         self.downloading_files = {}  # 格式: {filename: progress_str}
 
+        # ========== 新增：记录失败的链接 ==========
+        self.failed_links = []  # 存储失败的链接
+
+    # ========== 新增：获取失败链接的方法 ==========
+    def get_failed_links(self):
+        """返回失败的链接列表（线程安全）"""
+        with self.lock:
+            return self.failed_links.copy()
+
+    # ========== 新增：重置跟踪状态的方法 ==========
+    def reset_link_tracking(self):
+        """重置链接跟踪状态，用于重试（线程安全）"""
+        with self.lock:
+            self.failed_links = []
+            self.download_links = []
+            self.all_video_links = set()
+            # 不清空 downloading_files，因为下载中的文件应保持状态
+            # 不清空 results，因为它是临时结果，重置后需要重新处理
 
     async def check_pause(self, worker) -> bool:
         """检查暂停状态，如果暂停则等待"""
@@ -338,7 +360,8 @@ class HanimeScraper:
             self.standard_print("WARNING", "获取视频链接前检测到暂停指令")
             return []
 
-        async with BrowserManager(headless=self.headless, download_dir=self.downloader.download_dir) as browser:
+        async with BrowserManager(headless=self.headless, download_dir=self.downloader.download_dir, 
+                                 config_manager=self.config_manager) as browser:
             # 使用验证码绕过访问页面
             await browser.go_to_with_captcha_bypass(start_url)
 
@@ -423,7 +446,8 @@ class HanimeScraper:
             self.standard_print("WARNING", "处理链接前检测到暂停指令")
             return False
 
-        async with BrowserManager(headless=self.headless, download_dir=self.downloader.download_dir) as browser:
+        async with BrowserManager(headless=self.headless, download_dir=self.downloader.download_dir,
+                                 config_manager=self.config_manager) as browser:
             try:
                 # 使用验证码绕过访问页面
                 await browser.go_to_with_captcha_bypass(video_url)
@@ -469,13 +493,22 @@ class HanimeScraper:
                         return success
                     else:
                         self.standard_print("WARNING", f"✗ 未找到下载链接: {video_url}")
+                        # ========== 新增：记录失败链接 ==========
+                        with self.lock:
+                            self.failed_links.append(video_url)
                         return False
                 else:
                     self.standard_print("WARNING", f"✗ 未找到下载按钮: {video_url}")
+                    # ========== 新增：记录失败链接 ==========
+                    with self.lock:
+                        self.failed_links.append(video_url)
                     return False
 
             except Exception as e:
                 self.standard_print("ERROR", f"处理链接 {video_url} 时出错: {e}")
+                # ========== 新增：记录失败链接 ==========
+                with self.lock:
+                    self.failed_links.append(video_url)
                 return False
 
     def _process_link_thread(self, worker):
@@ -533,13 +566,13 @@ class HanimeScraper:
 
 
 class DownloadWorker(QThread):
-    """下载工作线程"""
     log_signal = pyqtSignal(str)
-    finished_signal = pyqtSignal(bool)  # 参数为下载是否成功
-    progress_signal = pyqtSignal(str)  # 进度信号，参数为进度文本
-    file_progress_signal = pyqtSignal(str, str)  # 文件进度信号，参数为(文件名, 进度)
+    finished_signal = pyqtSignal(bool)
+    progress_signal = pyqtSignal(str)
+    file_progress_signal = pyqtSignal(str, str)
+    count_updated_signal = pyqtSignal()  # <--- 新增信号
 
-    def __init__(self, url: str, download_dir: str, headless: bool, task_logger=None, task_id=None):
+    def __init__(self, url: str, download_dir: str, headless: bool, task_logger=None, task_id=None, config_manager=None):
         super().__init__()
         self.url = url
         self.download_dir = download_dir
@@ -549,14 +582,22 @@ class DownloadWorker(QThread):
         self._pause_condition = threading.Condition(threading.Lock())
         self.task_logger = task_logger
         self.task_id = task_id
+        self.config_manager = config_manager  # 配置管理器
         self.last_error = ""  # 记录最后错误信息
         self.current_filename = ""  # 当前正在下载的文件名
         self.scraper = None  # HanimeScraper实例
+        self.retry_failed_links = False  # 是否重试失败链接
+        self.failed_links_to_retry = []  # 待重试的失败链接
 
     def run(self):
         """执行下载任务"""
         try:
             self.log_signal.emit(f"开始处理链接: {self.url}")
+
+            # 每次任务开始时检测最新的无头模式设置
+            self._detect_headless_setting()
+
+            self.log_signal.emit(f"当前无头模式设置: {'启用' if self.headless else '禁用'}")
 
             # 创建scraper实例并设置参数
             self.scraper = HanimeScraper(
@@ -564,11 +605,12 @@ class DownloadWorker(QThread):
                 headless=self.headless,
                 download_dir=self.download_dir,
                 task_logger=self.task_logger,
-                task_id=self.task_id
+                task_id=self.task_id,
+                config_manager=self.config_manager
             )
 
             # 设置进度回调
-            self.scraper.downloader.set_progress_callback(self._on_progress_update)
+            self.scraper.downloader.set_progress_callback(self.on_progress_update)
 
             # 运行异步任务
             success = asyncio.run(self._process_link(self.scraper))
@@ -594,17 +636,17 @@ class DownloadWorker(QThread):
             traceback.print_exc()
             self.finished_signal.emit(False)
 
-    def _on_progress_update(self, filename: str, progress: str):
-        """处理进度更新"""
+    def on_progress_update(self, filename: str, progress: str):
         self.current_filename = filename
-        # 更新scraper中的进度
         if self.scraper:
             self.scraper.update_progress(filename, progress)
-            # 发送组合的进度文本
             progress_text = self.scraper.get_progress_text()
             self.progress_signal.emit(progress_text)
-            # 发送单个文件的进度（备用）
             self.file_progress_signal.emit(filename, progress)
+
+            # 如果进度为“已完成”，触发计数更新
+            if progress == "已完成":
+                self.count_updated_signal.emit()
 
     def get_current_filename(self) -> str:
         """获取当前正在下载的文件名"""
@@ -620,7 +662,26 @@ class DownloadWorker(QThread):
         if self.should_pause():
             return False
 
-        # 获取视频链接
+        # 如果是重试模式，直接处理失败链接
+        if self.retry_failed_links and self.failed_links_to_retry:
+            self.log_signal.emit(f"开始重试 {len(self.failed_links_to_retry)} 个失败的链接...")
+            # 清除之前的失败记录
+            if self.task_logger and self.task_id:
+                self.task_logger.clear_failed_links(self.task_id)
+            # 重置scraper的跟踪状态
+            scraper.reset_link_tracking()
+            await scraper.process_links_batch(self.failed_links_to_retry, self)
+
+            # 检查是否还有失败的链接
+            remaining_failed = scraper.get_failed_links()
+            if remaining_failed:
+                self.log_signal.emit(f"仍有 {len(remaining_failed)} 个链接失败，任务将暂停")
+                return False
+            else:
+                self.log_signal.emit("所有链接重试成功！")
+                return True
+
+        # 正常模式：获取视频链接
         video_links = await scraper.get_video_links(self.url, self)
 
         # 再次检查暂停状态
@@ -631,11 +692,21 @@ class DownloadWorker(QThread):
             self.log_signal.emit("没有找到任何视频链接")
             return False
 
+        # 触发计数更新信号（此时 TaskLogger 已存入视频链接列表）
+        self.count_updated_signal.emit()
+
         self.log_signal.emit(f"开始处理 {len(video_links)} 个视频链接...")
         await scraper.process_links_batch(video_links, self)
 
-        self.log_signal.emit(f"处理完成！共找到 {len(scraper.download_links)} 个下载链接")
-        return True
+        # 检查是否有失败链接需要重试
+        failed_links = scraper.get_failed_links()
+        if failed_links:
+            self.log_signal.emit(f"发现 {len(failed_links)} 个失败链接，任务将暂停以便重试")
+            self.failed_links_to_retry = failed_links
+            return False
+        else:
+            self.log_signal.emit(f"处理完成！共找到 {len(scraper.download_links)} 个下载链接")
+            return True
 
     def stop(self):
         """停止任务"""
@@ -670,3 +741,24 @@ class DownloadWorker(QThread):
     def is_running(self) -> bool:
         """检查任务是否仍在运行"""
         return self._is_running
+
+    def _detect_headless_setting(self) -> None:
+        """检测最新的无头模式设置
+
+        每次任务开始时调用此方法，确保使用最新的无头模式配置
+        """
+        try:
+            from ToolPart.Config import ConfigManager
+            config_manager = ConfigManager()
+
+            # 从配置文件读取最新的无头模式设置
+            latest_headless = config_manager.get("headless_mode", True)
+
+            # 如果设置发生了变化，更新当前实例
+            if self.headless != latest_headless:
+                self.log_signal.emit(f"检测到无头模式设置变更: {self.headless} -> {latest_headless}")
+                self.headless = latest_headless
+
+        except Exception as e:
+            # 如果检测失败，保持原有设置并记录错误
+            self.log_signal.emit(f"检测无头模式设置时出错: {str(e)}，使用原有设置: {self.headless}")

@@ -14,7 +14,11 @@ class ConfigManager:
             "download_dir": os.path.join(os.getcwd(), "Download"),  # 默认下载目录为当前目录下的Download文件夹
             "headless_mode": True,
             "window_position": [100, 100],  # 窗口位置 [x, y]
-            "window_size": [1000, 800]      # 窗口大小 [width, height]
+            "window_size": [1000, 800],      # 窗口大小 [width, height]
+            "cloudflare_timeout": 15,        # Cloudflare验证超时时间（秒）
+            "cloudflare_max_retries": 3,     # Cloudflare验证最大重试次数
+            "page_load_timeout": 60,         # 页面加载超时时间（秒）
+            "element_wait_timeout": 10       # 元素等待超时时间（秒）
         }
         self.config = self.load_config()
     
