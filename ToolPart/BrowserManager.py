@@ -64,25 +64,39 @@ class BrowserManager:
             return False
 
     def _create_chrome_options(self) -> ChromiumOptions:
-        """
-        创建Chrome浏览器选项
-
-        Returns:
-            ChromiumOptions: 浏览器选项对象
-        """
         options = ChromiumOptions()
 
-        # 基本反检测设置（参考test.py）
+        # 基本反检测设置
         options.add_argument('--disable-blink-features=AutomationControlled')
+        options.add_argument('--no-sandbox')  # Linux 环境下可能需要
+        options.add_argument('--disable-dev-shm-usage')  # 避免 /dev/shm 耗尽
 
-        # 无头模式设置
+        # 无头模式必须的参数
         if self.headless:
             options.add_argument('--headless=new')
+            options.add_argument('--disable-gpu')  # 必须
+            options.add_argument('--window-size=1920,1080')  # 设置合适分辨率
+            # 可选：设置用户代理，伪装成普通 Chrome
+            options.add_argument(
+                '--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
+        else:
+            options.add_argument('--window-size=1920,1080')  # 有头模式也可设置
+
+        # 阻止弹窗和通知
+        options.block_notifications = True
+        options.block_popups = True
+
+        # 页面加载状态（参考示例）
+        from pydoll.constants import PageLoadState
+        options.page_load_state = PageLoadState.INTERACTIVE
+
+        # 启动超时
+        options.start_timeout = 15
 
         # 下载设置
         options.set_default_download_directory(self.download_dir)
 
-        # 设置页面加载超时时间（秒）
+        # 页面加载超时（秒）
         options.page_load_timeout = self.page_load_timeout
 
         return options

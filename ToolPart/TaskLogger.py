@@ -26,30 +26,22 @@ class TaskLogger:
         # 确保日志目录存在
         os.makedirs(self.log_dir, exist_ok=True)
 
-
     def add_task(self, task_id: str, url: str, download_dir: str) -> None:
         """添加新任务"""
         with self.lock:
-            # 读取现有任务
             tasks = self._load_tasks()
-
-            # 创建任务信息
             task_info = {
                 "url": url,
                 "download_dir": download_dir,
-                "status": "waiting",  # waiting, running, paused, failed, completed
-                "video_links": [],  # 存储获取到的视频链接
-                "downloaded_videos": [],  # 存储已下载的视频文件名
-                "failed_links": [],  # 存储失败的链接
-                "failure_type": "",  # 失败类型
+                "status": "waiting",
+                "video_links": [],
+                "downloaded_videos": [],
+                "failed_links": [],
+                "failure_type": "",
                 "created_at": datetime.now().isoformat(),
                 "updated_at": datetime.now().isoformat()
             }
-
-            # 添加到任务列表
             tasks[task_id] = task_info
-
-            # 保存到文件
             self._save_tasks(tasks)
 
     def update_task_status(self, task_id: str, status: str) -> None:
@@ -86,7 +78,6 @@ class TaskLogger:
             if task_id in tasks:
                 if "downloaded_videos" not in tasks[task_id]:
                     tasks[task_id]["downloaded_videos"] = []
-
                 if video_filename not in tasks[task_id]["downloaded_videos"]:
                     tasks[task_id]["downloaded_videos"].append(video_filename)
                     tasks[task_id]["updated_at"] = datetime.now().isoformat()
@@ -99,13 +90,38 @@ class TaskLogger:
             if task_id in tasks:
                 if "failed_links" not in tasks[task_id]:
                     tasks[task_id]["failed_links"] = []
-
                 if link not in tasks[task_id]["failed_links"]:
                     tasks[task_id]["failed_links"].append(link)
                     if failure_type:
                         tasks[task_id]["failure_type"] = failure_type
                     tasks[task_id]["updated_at"] = datetime.now().isoformat()
                     self._save_tasks(tasks)
+
+    def remove_failed_link(self, task_id: str, link: str) -> None:
+        """从任务的失败链接列表中移除指定链接"""
+        with self.lock:
+            tasks = self._load_tasks()
+            if task_id in tasks:
+                failed_links = tasks[task_id].get("failed_links", [])
+                if link in failed_links:
+                    failed_links.remove(link)
+                    tasks[task_id]["failed_links"] = failed_links
+                    tasks[task_id]["updated_at"] = datetime.now().isoformat()
+                    self._save_tasks(tasks)
+                    self.log(LogLevel.INFO, f"已从失败链接中移除: {link}")
+
+    def remove_video_link(self, task_id: str, link: str) -> None:
+        """从任务的 video_links 列表中移除指定的链接"""
+        with self.lock:
+            tasks = self._load_tasks()
+            if task_id in tasks:
+                video_links = tasks[task_id].get("video_links", [])
+                if link in video_links:
+                    video_links.remove(link)
+                    tasks[task_id]["video_links"] = video_links
+                    tasks[task_id]["updated_at"] = datetime.now().isoformat()
+                    self._save_tasks(tasks)
+                    self.log(LogLevel.INFO, f"已从任务 {task_id} 的视频链接列表中移除: {link}")
 
     def clear_failed_links(self, task_id: str) -> None:
         """清除失败链接记录，用于重试"""
@@ -116,6 +132,14 @@ class TaskLogger:
                 tasks[task_id]["failure_type"] = ""
                 tasks[task_id]["updated_at"] = datetime.now().isoformat()
                 self._save_tasks(tasks)
+
+    def get_task_failed_links(self, task_id: str) -> List[str]:
+        """获取指定任务的失败链接列表"""
+        with self.lock:
+            tasks = self._load_tasks()
+            if task_id in tasks:
+                return tasks[task_id].get("failed_links", [])
+            return []
 
     def remove_task(self, task_id: str) -> bool:
         """删除任务，返回是否删除成功"""
@@ -136,15 +160,13 @@ class TaskLogger:
             return self._load_tasks()
 
     def get_incomplete_tasks(self) -> Dict[str, Any]:
-        """获取未完成的任务（waiting、running、paused、failed状态）"""
+        """获取未完成的任务（waiting、running、paused、failed、stopped状态）"""
         with self.lock:
             tasks = self._load_tasks()
             incomplete_tasks = {}
-
             for task_id, task_info in tasks.items():
-                if task_info["status"] in ["waiting", "running", "paused", "failed"]:
+                if task_info["status"] in ["waiting", "running", "paused", "failed", "stopped"]:
                     incomplete_tasks[task_id] = task_info
-
             return incomplete_tasks
 
     def get_waiting_and_running_tasks(self) -> Dict[str, Any]:
@@ -152,11 +174,9 @@ class TaskLogger:
         with self.lock:
             tasks = self._load_tasks()
             result = {}
-
             for task_id, task_info in tasks.items():
                 if task_info["status"] in ["waiting", "running"]:
                     result[task_id] = task_info
-
             return result
 
     def get_failed_tasks(self) -> Dict[str, Any]:
@@ -164,11 +184,9 @@ class TaskLogger:
         with self.lock:
             tasks = self._load_tasks()
             failed_tasks = {}
-
             for task_id, task_info in tasks.items():
                 if task_info["status"] == "failed":
                     failed_tasks[task_id] = task_info
-
             return failed_tasks
 
     def get_downloading_files(self, download_dir: str) -> List[str]:
@@ -180,17 +198,31 @@ class TaskLogger:
                 downloading_files = [f for f in files if f.startswith('下载中_') and f.endswith('.mp4')]
         except Exception as e:
             print(f"扫描下载目录时出错: {e}")
-
         return downloading_files
 
     def clear_all_tasks(self) -> None:
         """清空所有任务"""
         with self.lock:
-            # 清空任务文件
             with open(self.config_file, 'w', encoding='utf-8') as f:
                 json.dump({}, f, indent=4, ensure_ascii=False)
 
-
+    def cleanup_completed_task(self, task_id: str) -> bool:
+        """清理单个已完成的任务"""
+        with self.lock:
+            tasks = self._load_tasks()
+            if task_id in tasks:
+                task_info = tasks[task_id]
+                if task_info["status"] == "completed":
+                    del tasks[task_id]
+                    self._save_tasks(tasks)
+                    self.log(LogLevel.INFO, f"已清理已完成任务: {task_id}")
+                    return True
+                else:
+                    self.log(LogLevel.WARNING, f"任务 {task_id} 状态为 {task_info['status']}，不能清理")
+                    return False
+            else:
+                self.log(LogLevel.WARNING, f"任务 {task_id} 不存在")
+                return False
 
     def _load_tasks(self) -> Dict[str, Any]:
         """加载任务数据"""
@@ -208,30 +240,9 @@ class TaskLogger:
         except Exception as e:
             self.log(LogLevel.ERROR, f"保存任务日志失败: {e}")
 
-    def cleanup_completed_task(self, task_id: str) -> bool:
-        """清理单个已完成的任务"""
-        with self.lock:
-            tasks = self._load_tasks()
-            if task_id in tasks:
-                task_info = tasks[task_id]
-                # 只删除已完成的任务
-                if task_info["status"] == "completed":
-                    del tasks[task_id]
-                    self._save_tasks(tasks)
-                    self.log(LogLevel.INFO, f"已清理已完成任务: {task_id}")
-                    return True
-                else:
-                    self.log(LogLevel.WARNING, f"任务 {task_id} 状态为 {task_info['status']}，不能清理")
-                    return False
-            else:
-                self.log(LogLevel.WARNING, f"任务 {task_id} 不存在")
-                return False
-
     def log(self, level: LogLevel, message: str) -> None:
         """记录结构化日志"""
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        
-        # 控制台输出（不带颜色）
         print(f"[{timestamp}] {level.value} - {message}")
 
     def get_plain_log_message(self, level: LogLevel, message: str) -> str:
