@@ -5,7 +5,7 @@ import uuid
 from datetime import datetime
 from typing import Dict, List, Optional
 
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtGui import QFont
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                              QLabel, QLineEdit, QPushButton, QTextEdit, QGroupBox,
@@ -24,7 +24,7 @@ class StepTracker:
         self.step_name = step_name
         self.start_time = time.time()
         self.end_time: Optional[float] = None
-        self.status = "running"  # running, completed, failed
+        self.status = "running"
         self.details: Dict = {}
 
     def complete(self, details: Optional[Dict] = None):
@@ -103,15 +103,15 @@ def _update_task_ui_status(task_frame, status_text, status_color,
 
 
 class TaskManager:
-    """任务管理器，控制并发数量"""
+    """任务管理器，控制并发数量，重构版，统一状态管理"""
 
     def __init__(self, max_active_tasks=2, task_logger=None):
         self.max_active_tasks = max_active_tasks
-        self.active_tasks = []
-        self.pending_tasks = []
-        self.paused_tasks = []
-        self.task_info_map = {}
+        self.task_info_map = {}          # task_id -> task_info
         self.task_logger = task_logger
+
+    def _get_tasks_by_status(self, status: str) -> List[Dict]:
+        return [info for info in self.task_info_map.values() if info['status'] == status]
 
     def add_task(self, worker, task_frame, url, task_id=None, is_resume=False, status="pending"):
         if task_id is None:
@@ -125,40 +125,40 @@ class TaskManager:
             'status': status
         }
 
-        if status == 'active':
-            if len(self.active_tasks) < self.max_active_tasks:
-                self.active_tasks.append(task_info)
-                task_info['worker'].start()
-                if self.task_logger:
-                    self.task_logger.update_task_status(task_id, 'running')
-            else:
-                self.pending_tasks.append(task_info)
-                task_info['status'] = 'pending'
-        elif status == 'paused':
-            self.paused_tasks.append(task_info)
-            if self.task_logger:
-                self.task_logger.update_task_status(task_id, 'paused')
-        else:
-            self.pending_tasks.append(task_info)
-
         self.task_info_map[task_id] = task_info
+
+        if status == 'active':
+            worker.start()
+        elif status == 'pending':
+            # 尝试启动
+            self._try_start_pending_tasks()
+        elif status == 'paused':
+            # 已经暂停，不启动
+            pass
 
         if self.task_logger and not is_resume:
             self.task_logger.add_task(task_id, url, worker.download_dir)
 
-        self._try_start_pending_tasks()
-
         return task_id
 
     def _try_start_pending_tasks(self):
-        while len(self.active_tasks) < self.max_active_tasks and self.pending_tasks:
-            task_info = self.pending_tasks.pop(0)
-            self.active_tasks.append(task_info)
+        pending = self._get_tasks_by_status('pending')
+        active = self._get_tasks_by_status('active')
+        while len(active) < self.max_active_tasks and pending:
+            task_info = pending[0]
             task_info['status'] = 'active'
-            task_info['worker'].start()
+            # 唤醒或启动线程
+            worker = task_info['worker']
+            if worker.isRunning():
+                worker.resume()
+            else:
+                worker.start()
             if self.task_logger:
                 self.task_logger.update_task_status(task_info['task_id'], 'running')
             self._set_task_ui_running(task_info['task_frame'])
+            # 更新列表
+            pending = self._get_tasks_by_status('pending')
+            active = self._get_tasks_by_status('active')
 
     def _find_task_id_by_worker(self, worker):
         for tid, info in self.task_info_map.items():
@@ -168,64 +168,57 @@ class TaskManager:
 
     def pause_task(self, worker):
         task_id = self._find_task_id_by_worker(worker)
-        if task_id and task_id in self.task_info_map:
-            task_info = self.task_info_map[task_id]
-            if task_info['status'] == 'active':
-                task_info['worker'].pause()
-                task_info['status'] = 'paused'
-                if self.task_logger:
-                    self.task_logger.update_task_status(task_id, 'paused')
-                self._set_task_ui_paused(task_info['task_frame'])
-                if task_info in self.active_tasks:
-                    self.active_tasks.remove(task_info)
-                    self.paused_tasks.append(task_info)
-                    self._try_start_pending_tasks()
+        if not task_id:
+            return
+        task_info = self.task_info_map[task_id]
+        if task_info['status'] == 'active':
+            task_info['worker'].pause()
+            task_info['status'] = 'paused'
+            if self.task_logger:
+                self.task_logger.update_task_status(task_id, 'paused')
+            self._set_task_ui_paused(task_info['task_frame'])
+            # 尝试启动其他 pending 任务
+            self._try_start_pending_tasks()
 
     def resume_task(self, worker, force_retry=False):
         task_id = self._find_task_id_by_worker(worker)
-        if task_id and task_id in self.task_info_map:
-            task_info = self.task_info_map[task_id]
-            if force_retry:
-                # 重新从 logger 加载失败链接并设置重试标志
-                if hasattr(worker, 'reload_failed_links_from_logger'):
-                    worker.reload_failed_links_from_logger()
-                # 确保重试标志为 True
-                worker.retry_failed_links = True
-                # 如果任务状态为 failed，也需要改为 paused 以便恢复
-                if task_info['status'] == 'failed':
-                    task_info['status'] = 'paused'
-            if task_info['status'] in ['paused', 'failed']:
-                self._resume_task_internal(task_info, task_id)
+        if not task_id:
+            return
+        task_info = self.task_info_map[task_id]
+        if force_retry:
+            if hasattr(worker, 'reload_failed_links_from_logger'):
+                worker.reload_failed_links_from_logger()
+            worker.retry_failed_links = True
+        if task_info['status'] in ['paused', 'failed']:
+            task_info['status'] = 'pending'   # 先设为 pending，等待调度
+            if self.task_logger:
+                self.task_logger.update_task_status(task_id, 'waiting')
+            self._set_task_ui_pending(task_info['task_frame'])
+            self._try_start_pending_tasks()
 
     def stop_task(self, worker):
         task_id = self._find_task_id_by_worker(worker)
         if not task_id:
             return
-        task_info = self.task_info_map.get(task_id)
-        if not task_info:
-            return
+        task_info = self.task_info_map[task_id]
 
         # 强制停止线程
         if hasattr(worker, 'stop'):
             worker.stop()
         # 唤醒可能阻塞的暂停等待
-        with worker._pause_condition:
-            worker._pause_condition.notify_all()
-        # 等待线程结束（带超时）
+        with worker._pause_condition if hasattr(worker, '_pause_condition') else None:
+            pass  # 实际使用 Event，不需要
+
         if worker.isRunning():
             if not worker.wait(5000):
-                print(f"警告：任务 {task_id} 线程在5秒内未停止，可能仍在运行")
-
-        # 从各队列中移除
-        for queue_name in ['active_tasks', 'pending_tasks', 'paused_tasks']:
-            queue = getattr(self, queue_name, [])
-            if task_info in queue:
-                queue.remove(task_info)
+                print(f"警告：任务 {task_id} 线程在5秒内未停止")
 
         task_info['status'] = 'stopped'
         self._set_task_ui_stopped(task_info['task_frame'])
         if self.task_logger:
             self.task_logger.update_task_status(task_id, 'stopped')
+        # 尝试启动其他 pending
+        self._try_start_pending_tasks()
 
     def remove_task(self, worker):
         task_id = self._find_task_id_by_worker(worker)
@@ -253,37 +246,9 @@ class TaskManager:
             print(f"从TaskLogger删除任务时出错: {e}")
 
         try:
-            if task_info in self.active_tasks:
-                self.active_tasks.remove(task_info)
-            elif task_info in self.pending_tasks:
-                self.pending_tasks.remove(task_info)
-            elif task_info in self.paused_tasks:
-                self.paused_tasks.remove(task_info)
-        except Exception as e:
-            print(f"从任务列表移除时出错: {e}")
-
-        try:
             del self.task_info_map[task_id]
         except Exception as e:
             print(f"删除任务映射时出错: {e}")
-
-    def _resume_task_internal(self, task_info: dict, task_id: str) -> None:
-        task_info['worker'].resume()
-        task_info['status'] = 'active'
-        if self.task_logger:
-            self.task_logger.update_task_status(task_id, 'running')
-        self._set_task_ui_running(task_info['task_frame'])
-
-        if task_info in self.paused_tasks:
-            self.paused_tasks.remove(task_info)
-
-        if len(self.active_tasks) < self.max_active_tasks:
-            self.active_tasks.append(task_info)
-            if not task_info['worker'].isRunning():
-                task_info['worker'].start()
-        else:
-            self.pending_tasks.append(task_info)
-            task_info['status'] = 'pending'
 
     def _set_task_ui_paused(self, task_frame):
         _update_task_ui_status(
@@ -303,6 +268,17 @@ class TaskManager:
             "#2ecc71",
             pause_enabled=True,
             pause_style="background-color: #3498db;",
+            resume_enabled=False,
+            resume_style="background-color: #7f8c8d;"
+        )
+
+    def _set_task_ui_pending(self, task_frame):
+        _update_task_ui_status(
+            task_frame,
+            "状态: 待处理",
+            "#7f8c8d",
+            pause_enabled=True,
+            pause_style="",
             resume_enabled=False,
             resume_style="background-color: #7f8c8d;"
         )
@@ -330,68 +306,54 @@ class TaskManager:
         )
 
     def pause_all_tasks(self):
-        tasks_to_pause = []
-        for task_info in self.active_tasks[:]:
+        for task_info in self.task_info_map.values():
             if task_info['status'] == 'active':
-                tasks_to_pause.append(task_info)
-
-        for task_info in tasks_to_pause:
-            task_info['worker'].pause()
-            task_info['status'] = 'paused'
-            if self.task_logger:
-                self.task_logger.update_task_status(task_info['task_id'], 'paused')
-            self._set_task_ui_paused(task_info['task_frame'])
-            if task_info in self.active_tasks:
-                self.active_tasks.remove(task_info)
-                self.paused_tasks.append(task_info)
+                task_info['worker'].pause()
+                task_info['status'] = 'paused'
+                if self.task_logger:
+                    self.task_logger.update_task_status(task_info['task_id'], 'paused')
+                self._set_task_ui_paused(task_info['task_frame'])
+        # 不需要启动 pending，因为暂停了活跃任务后，pending 仍然在等待
 
     def resume_all_tasks(self, force_retry_failed=False):
-        tasks_to_resume = []
-        for task_info in self.paused_tasks[:]:
-            if task_info['status'] == 'paused':
-                tasks_to_resume.append(task_info)
         for task_info in self.task_info_map.values():
-            if task_info['status'] == 'failed':
-                tasks_to_resume.append(task_info)
-
-        if not tasks_to_resume:
-            return
-
-        for task_info in tasks_to_resume:
-            if force_retry_failed:
-                # 重新加载失败链接并设置重试标志
-                if hasattr(task_info['worker'], 'reload_failed_links_from_logger'):
-                    task_info['worker'].reload_failed_links_from_logger()
-                task_info['worker'].retry_failed_links = True
             if task_info['status'] in ['paused', 'failed']:
-                self._resume_task_internal(task_info, task_info['task_id'])
-
-        self.paused_tasks.clear()
+                if force_retry_failed:
+                    worker = task_info['worker']
+                    if hasattr(worker, 'reload_failed_links_from_logger'):
+                        worker.reload_failed_links_from_logger()
+                    worker.retry_failed_links = True
+                task_info['status'] = 'pending'
+                if self.task_logger:
+                    self.task_logger.update_task_status(task_info['task_id'], 'waiting')
+                self._set_task_ui_pending(task_info['task_frame'])
+        self._try_start_pending_tasks()
 
     def stop_all_tasks(self):
-        print(f"停止所有任务 - 活跃: {len(self.active_tasks)}, 待处理: {len(self.pending_tasks)}, 暂停: {len(self.paused_tasks)}")
+        print(f"停止所有任务 - 活跃: {len(self._get_tasks_by_status('active'))}, "
+              f"待处理: {len(self._get_tasks_by_status('pending'))}, "
+              f"暂停: {len(self._get_tasks_by_status('paused'))}")
 
         # 先发出停止信号
-        for task_info in self.active_tasks[:] + self.pending_tasks[:] + self.paused_tasks[:]:
+        for task_info in self.task_info_map.values():
             if hasattr(task_info['worker'], 'stop'):
                 task_info['worker'].stop()
-            with task_info['worker']._pause_condition:
-                task_info['worker']._pause_condition.notify_all()
+            # 唤醒暂停事件
+            if hasattr(task_info['worker'], '_pause_event'):
+                task_info['worker']._pause_event.set()
 
         # 等待所有任务线程结束
-        for task_info in self.active_tasks[:] + self.paused_tasks[:]:
+        for task_info in self.task_info_map.values():
             if task_info['worker'].isRunning():
                 if not task_info['worker'].wait(5000):
                     print(f"警告：任务 {task_info['task_id']} 线程未能在5秒内停止")
 
-        # 清理状态
-        self.active_tasks.clear()
-        self.pending_tasks.clear()
-        self.paused_tasks.clear()
-        # 注意：task_info_map 中的条目可能还保留，但状态已标记为 stopped
+        # 标记所有任务为 stopped
         for task_info in self.task_info_map.values():
             task_info['status'] = 'stopped'
             self._set_task_ui_stopped(task_info['task_frame'])
+            if self.task_logger:
+                self.task_logger.update_task_status(task_info['task_id'], 'stopped')
 
     def clear_all_tasks(self):
         try:
@@ -401,9 +363,6 @@ class TaskManager:
                     self.task_logger.clear_all_tasks()
             except Exception as e:
                 print(f"清空TaskLogger时出错: {e}")
-            self.active_tasks.clear()
-            self.pending_tasks.clear()
-            self.paused_tasks.clear()
             self.task_info_map.clear()
         except Exception as e:
             print(f"清空所有任务时发生未知错误: {e}")
@@ -607,7 +566,7 @@ class MainWindow(QMainWindow):
         url_input_layout = QHBoxLayout()
         self.url_input = QLineEdit()
         self.url_input.setPlaceholderText("例如: https://hanime1.me/watch?v=????")
-        self.url_input.setMinimumHeight(50)  # 增加输入框高度
+        self.url_input.setMinimumHeight(50)
         url_input_layout.addWidget(self.url_input, 1)
 
         paste_btn = QPushButton("粘贴")
@@ -621,7 +580,7 @@ class MainWindow(QMainWindow):
         url_input_layout.addWidget(self.headless_checkbox)
 
         input_layout.addLayout(url_input_layout)
-        input_layout.addSpacing(10)  # 在输入框和按钮之间增加间距
+        input_layout.addSpacing(10)
 
         button_layout = QHBoxLayout()
         self.download_btn = QPushButton("开始下载")
@@ -787,7 +746,7 @@ class MainWindow(QMainWindow):
             worker.count_updated_signal.connect(lambda: self.update_task_count(worker))
 
             task_frame = self.create_task_frame(url, worker)
-            task_id = self.task_manager.add_task(worker, task_frame, url, task_id=task_id)
+            task_id = self.task_manager.add_task(worker, task_frame, url, task_id=task_id, status='pending')
 
             self.complete_step_log(task_creation_step, {
                 "任务ID": task_id[:8],
@@ -808,7 +767,6 @@ class MainWindow(QMainWindow):
             self.fail_step_log(task_creation_step, str(e))
             self.log_message(f"创建下载任务失败: {str(e)}", "ERROR")
 
-    # ========== 关键修改：on_download_finished 方法 ==========
     def on_download_finished(self, success: bool) -> None:
         sender = self.sender()
         task_id = None
@@ -819,21 +777,15 @@ class MainWindow(QMainWindow):
                 task_info = info
                 break
 
-        # 确保task_id被使用以避免未使用变量警告
         if task_id is not None and task_info:
             url = task_info['url']
 
             if success:
-                # 从UI移除任务框架
                 self.tasks_layout.removeWidget(task_info['task_frame'])
                 task_info['task_frame'].deleteLater()
-
-                # 从任务管理器彻底移除（包括清理资源、从logger删除）
                 self.task_manager.remove_task(sender)
-
                 self.log_message(f"下载任务已完成并已移除: {url}", "SUCCESS")
             else:
-                # 失败处理（原有逻辑保持不变）
                 self.log_message(f"下载任务失败: {url}")
                 worker = task_info['worker']
                 if hasattr(worker, 'failed_links_to_retry') and worker.failed_links_to_retry:
@@ -845,6 +797,8 @@ class MainWindow(QMainWindow):
                         left_progress = progress_frame.findChild(QLabel, "left_progress")
                         if left_progress:
                             left_progress.setText(f"{len(worker.failed_links_to_retry)}个链接失败，点击继续重试")
+                    if self.task_manager.task_logger:
+                        self.task_manager.task_logger.update_task_status(task_id, 'paused')
                 else:
                     if self.task_manager.task_logger:
                         self.task_manager.task_logger.update_task_status(task_id, 'failed')
@@ -855,13 +809,6 @@ class MainWindow(QMainWindow):
                         if left_progress:
                             left_progress.setText("下载失败")
                     task_info['status'] = 'failed'
-
-                if task_info in self.task_manager.active_tasks:
-                    self.task_manager.active_tasks.remove(task_info)
-                elif task_info in self.task_manager.pending_tasks:
-                    self.task_manager.pending_tasks.remove(task_info)
-                elif task_info in self.task_manager.paused_tasks:
-                    self.task_manager.paused_tasks.remove(task_info)
 
                 self.task_manager._try_start_pending_tasks()
 
@@ -926,7 +873,11 @@ class MainWindow(QMainWindow):
                 if task_id in all_tasks:
                     task_data = all_tasks[task_id]
                     downloaded_count = len(task_data.get('downloaded_videos', []))
-                    remaining_count = len(task_data.get('video_links', []))  # 包含失败和未处理的
+                    video_links = task_data.get('video_links', [])
+                    failed_links = task_data.get('failed_links', [])
+                    remaining_count = len(video_links) - downloaded_count  # 失败链接也算剩余
+                    if remaining_count < 0:
+                        remaining_count = 0
                     total_count = downloaded_count + remaining_count
                     progress_count_label.setText(f"{downloaded_count}/{total_count}")
                     if total_count > 0:
@@ -954,7 +905,7 @@ class MainWindow(QMainWindow):
             print(f"更新进度计数显示时出错: {e}")
 
     def pause_download(self) -> None:
-        if self.task_manager.active_tasks:
+        if self.task_manager.task_info_map:
             self.task_manager.pause_all_tasks()
             self.log_message("已暂停所有下载任务")
         else:
@@ -1051,9 +1002,6 @@ class MainWindow(QMainWindow):
                 if child.widget():
                     child.widget().deleteLater()
 
-            self.task_manager.active_tasks.clear()
-            self.task_manager.pending_tasks.clear()
-            self.task_manager.paused_tasks.clear()
             self.task_manager.task_info_map.clear()
 
             self.log_message("已清空所有任务")
@@ -1183,8 +1131,6 @@ class MainWindow(QMainWindow):
                     if right_progress:
                         right_progress.setText("")
 
-                if task_info not in self.task_manager.pending_tasks:
-                    self.task_manager.pending_tasks.append(task_info)
                 self.task_manager._try_start_pending_tasks()
                 self.log_message(f"已重新开始停止的任务 (ID: {task_id[:8]})")
             else:
@@ -1218,27 +1164,12 @@ class MainWindow(QMainWindow):
             self.log_message("未找到要停止的任务")
 
     def stop_all_tasks(self):
-        has_tasks_to_stop = (self.task_manager.active_tasks or
-                             self.task_manager.pending_tasks or
-                             self.task_manager.paused_tasks)
+        has_tasks_to_stop = bool(self.task_manager.task_info_map)
 
         if has_tasks_to_stop:
             self.log_message("正在停止所有任务，请稍候...")
             self.task_manager.stop_all_tasks()
             self._cleanup_all_tasks_completely()
-
-            for task_info in self.task_manager.task_info_map.values():
-                if task_info['status'] in ['active', 'pending', 'paused']:
-                    task_info['status'] = 'stopped'
-                    self.task_manager._set_task_ui_stopped(task_info['task_frame'])
-                    if self.task_manager.task_logger and task_info.get('task_id'):
-                        self.task_manager.task_logger.update_task_status(
-                            task_info['task_id'], 'stopped')
-
-            self.task_manager.active_tasks.clear()
-            self.task_manager.pending_tasks.clear()
-            self.task_manager.paused_tasks.clear()
-
             self.log_message("已停止所有下载任务，资源已清理完成")
         else:
             self.log_message("没有可停止的任务")
@@ -1272,7 +1203,10 @@ class MainWindow(QMainWindow):
                 if hasattr(worker.scraper, 'close_all_browsers'):
                     import asyncio
                     try:
-                        asyncio.run(worker.scraper.close_all_browsers())
+                        loop = asyncio.new_event_loop()
+                        asyncio.set_event_loop(loop)
+                        loop.run_until_complete(worker.scraper.close_all_browsers())
+                        loop.close()
                     except Exception as e:
                         print(f"关闭浏览器管理器时出错: {e}")
         except Exception as e:

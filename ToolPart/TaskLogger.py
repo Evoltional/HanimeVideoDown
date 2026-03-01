@@ -7,7 +7,6 @@ from typing import Dict, List, Any
 
 
 class LogLevel(Enum):
-    """日志级别枚举"""
     DEBUG = "DEBUG"
     INFO = "INFO"
     WARNING = "WARNING"
@@ -16,18 +15,13 @@ class LogLevel(Enum):
 
 
 class TaskLogger:
-    """任务队列临时文件管理器"""
-
     def __init__(self, log_dir: str = "Logger", config_file: str = "TaskLogger.json"):
         self.log_dir = log_dir
         self.config_file = os.path.join(log_dir, config_file)
         self.lock = threading.Lock()
-
-        # 确保日志目录存在
         os.makedirs(self.log_dir, exist_ok=True)
 
     def add_task(self, task_id: str, url: str, download_dir: str) -> None:
-        """添加新任务"""
         with self.lock:
             tasks = self._load_tasks()
             task_info = {
@@ -45,7 +39,6 @@ class TaskLogger:
             self._save_tasks(tasks)
 
     def update_task_status(self, task_id: str, status: str) -> None:
-        """更新任务状态"""
         with self.lock:
             tasks = self._load_tasks()
             if task_id in tasks:
@@ -54,7 +47,6 @@ class TaskLogger:
                 self._save_tasks(tasks)
 
     def update_task(self, task_id: str, updates: Dict[str, Any]) -> None:
-        """更新任务信息"""
         with self.lock:
             tasks = self._load_tasks()
             if task_id in tasks:
@@ -63,7 +55,6 @@ class TaskLogger:
                 self._save_tasks(tasks)
 
     def add_video_links(self, task_id: str, video_links: List[str]) -> None:
-        """添加视频链接到任务"""
         with self.lock:
             tasks = self._load_tasks()
             if task_id in tasks:
@@ -72,7 +63,6 @@ class TaskLogger:
                 self._save_tasks(tasks)
 
     def add_downloaded_video(self, task_id: str, video_filename: str) -> None:
-        """添加已下载的视频文件"""
         with self.lock:
             tasks = self._load_tasks()
             if task_id in tasks:
@@ -84,7 +74,6 @@ class TaskLogger:
                     self._save_tasks(tasks)
 
     def add_failed_link(self, task_id: str, link: str, failure_type: str = "") -> None:
-        """添加失败链接"""
         with self.lock:
             tasks = self._load_tasks()
             if task_id in tasks:
@@ -98,7 +87,6 @@ class TaskLogger:
                     self._save_tasks(tasks)
 
     def remove_failed_link(self, task_id: str, link: str) -> None:
-        """从任务的失败链接列表中移除指定链接"""
         with self.lock:
             tasks = self._load_tasks()
             if task_id in tasks:
@@ -111,7 +99,6 @@ class TaskLogger:
                     self.log(LogLevel.INFO, f"已从失败链接中移除: {link}")
 
     def remove_video_link(self, task_id: str, link: str) -> None:
-        """从任务的 video_links 列表中移除指定的链接"""
         with self.lock:
             tasks = self._load_tasks()
             if task_id in tasks:
@@ -124,7 +111,6 @@ class TaskLogger:
                     self.log(LogLevel.INFO, f"已从任务 {task_id} 的视频链接列表中移除: {link}")
 
     def clear_failed_links(self, task_id: str) -> None:
-        """清除失败链接记录，用于重试"""
         with self.lock:
             tasks = self._load_tasks()
             if task_id in tasks:
@@ -134,7 +120,6 @@ class TaskLogger:
                 self._save_tasks(tasks)
 
     def get_task_failed_links(self, task_id: str) -> List[str]:
-        """获取指定任务的失败链接列表"""
         with self.lock:
             tasks = self._load_tasks()
             if task_id in tasks:
@@ -142,7 +127,6 @@ class TaskLogger:
             return []
 
     def remove_task(self, task_id: str) -> bool:
-        """删除任务，返回是否删除成功"""
         with self.lock:
             tasks = self._load_tasks()
             if task_id in tasks:
@@ -155,12 +139,10 @@ class TaskLogger:
                 return False
 
     def get_all_tasks(self) -> Dict[str, Any]:
-        """获取所有任务"""
         with self.lock:
             return self._load_tasks()
 
     def get_incomplete_tasks(self) -> Dict[str, Any]:
-        """获取未完成的任务（waiting、running、paused、failed、stopped状态）"""
         with self.lock:
             tasks = self._load_tasks()
             incomplete_tasks = {}
@@ -170,7 +152,6 @@ class TaskLogger:
             return incomplete_tasks
 
     def get_waiting_and_running_tasks(self) -> Dict[str, Any]:
-        """获取等待中和运行中的任务"""
         with self.lock:
             tasks = self._load_tasks()
             result = {}
@@ -180,7 +161,6 @@ class TaskLogger:
             return result
 
     def get_failed_tasks(self) -> Dict[str, Any]:
-        """获取失败的任务"""
         with self.lock:
             tasks = self._load_tasks()
             failed_tasks = {}
@@ -190,7 +170,6 @@ class TaskLogger:
             return failed_tasks
 
     def get_downloading_files(self, download_dir: str) -> List[str]:
-        """获取指定目录下所有'下载中_'前缀的文件"""
         downloading_files = []
         try:
             if os.path.exists(download_dir):
@@ -201,13 +180,11 @@ class TaskLogger:
         return downloading_files
 
     def clear_all_tasks(self) -> None:
-        """清空所有任务"""
         with self.lock:
             with open(self.config_file, 'w', encoding='utf-8') as f:
                 json.dump({}, f, indent=4, ensure_ascii=False)
 
     def cleanup_completed_task(self, task_id: str) -> bool:
-        """清理单个已完成的任务"""
         with self.lock:
             tasks = self._load_tasks()
             if task_id in tasks:
@@ -225,7 +202,6 @@ class TaskLogger:
                 return False
 
     def _load_tasks(self) -> Dict[str, Any]:
-        """加载任务数据"""
         try:
             with open(self.config_file, 'r', encoding='utf-8') as f:
                 return json.load(f)
@@ -233,7 +209,6 @@ class TaskLogger:
             return {}
 
     def _save_tasks(self, tasks: Dict[str, Any]) -> None:
-        """保存任务数据"""
         try:
             with open(self.config_file, 'w', encoding='utf-8') as f:
                 json.dump(tasks, f, indent=4, ensure_ascii=False)
@@ -241,11 +216,9 @@ class TaskLogger:
             self.log(LogLevel.ERROR, f"保存任务日志失败: {e}")
 
     def log(self, level: LogLevel, message: str) -> None:
-        """记录结构化日志"""
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         print(f"[{timestamp}] {level.value} - {message}")
 
     def get_plain_log_message(self, level: LogLevel, message: str) -> str:
-        """获取纯文本格式的日志消息"""
         timestamp = datetime.now().strftime("%H:%M:%S")
         return f"[{timestamp}] {level.value} - {message}"
