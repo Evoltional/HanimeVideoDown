@@ -4,14 +4,16 @@ import queue
 import threading
 import time
 import re
+import logging
 from typing import List, Optional, Tuple
 from urllib.parse import unquote
-import weakref
 
 import requests
 from PyQt5.QtCore import QThread, pyqtSignal
 
 from ToolPart.BrowserManager import BrowserManager
+
+logger = logging.getLogger(__name__)
 
 
 class VideoDownloader:
@@ -21,9 +23,16 @@ class VideoDownloader:
         self.headless = headless
         os.makedirs(self.download_dir, exist_ok=True)
         self.progress_callback = None
+        self._session = None
 
     def set_progress_callback(self, callback):
         self.progress_callback = callback
+
+    @property
+    def session(self):
+        if self._session is None:
+            self._session = requests.Session()
+        return self._session
 
     @staticmethod
     def _sanitize_filename(filename: str) -> str:
@@ -31,7 +40,6 @@ class VideoDownloader:
         for char in invalid_chars:
             filename = filename.replace(char, '_')
         filename = unquote(filename)
-        # 限制长度，防止文件名过长
         if len(filename) > 200:
             name, ext = os.path.splitext(filename)
             filename = name[:190] + ext
@@ -43,10 +51,6 @@ class VideoDownloader:
         else:
             return f"{size_bytes / (1024 * 1024):.1f} MB"
 
-    def standard_print(self, level: str, message: str) -> None:
-        timestamp = time.strftime("%H:%M:%S")
-        print(f"[{timestamp}] {level.upper()} - {message}")
-
     async def check_pause(self, worker) -> bool:
         if worker and hasattr(worker, 'should_pause'):
             return worker.should_pause()
@@ -57,21 +61,22 @@ class VideoDownloader:
             return worker.should_stop()
         return False
 
-    async def extract_download_info(self, download_page_url: str, worker=None, browser: BrowserManager = None) -> Tuple[Optional[str], Optional[str]]:
+    async def extract_download_info(self, download_page_url: str, worker=None, browser: BrowserManager = None,
+                                    use_bypass: bool = False) -> Tuple[Optional[str], Optional[str]]:
         """
         提取下载信息，可复用已存在的浏览器实例
         :param download_page_url: 下载页面URL
-        :param worker: 工作线程实例（用于检查暂停/停止）
-        :param browser: 可选的浏览器管理器，如果提供则使用该实例，否则新建
+        :param worker: 工作线程实例
+        :param browser: 可选的浏览器管理器
+        :param use_bypass: 是否启用验证码绕过
         """
         if await self.check_stop(worker):
-            print("提取下载信息前检测到停止指令")
+            logger.warning("提取下载信息前检测到停止指令")
             return None, None
         if await self.check_pause(worker):
-            print("浏览器操作被暂停")
+            logger.warning("浏览器操作被暂停")
             return None, None
 
-        # 如果未提供浏览器，则新建一个（后续会关闭）
         need_close = False
         if browser is None:
             browser = BrowserManager(headless=self.headless, download_dir=self.download_dir)
@@ -79,88 +84,53 @@ class VideoDownloader:
             need_close = True
 
         try:
-            self.standard_print("INFO", f"访问下载页面: {download_page_url}")
-            await browser.go_to(download_page_url, use_bypass=False)
-            await asyncio.sleep(3)
-
-            if await self.check_stop(worker):
-                print("页面加载后检测到停止指令")
-                return None, None
-            if await self.check_pause(worker):
-                print("页面加载后检测到暂停指令")
-                return None, None
-
-            try:
-                table_element = None
-                for attempt in range(3):
-                    if await self.check_stop(worker):
-                        print("查找表格时检测到停止指令")
-                        return None, None
-                    if await self.check_pause(worker):
-                        print("查找表格时检测到暂停指令")
-                        return None, None
-                    table_element = await browser.query_element(
-                        '//*[@id="content-div"]/div[1]/div[4]/div/div/table',
-                        timeout=5, raise_exc=False
-                    )
-                    if table_element:
-                        break
-                    await asyncio.sleep(1)
-
-                if not table_element:
-                    print("未找到下载链接列表表格")
-                    return None, None
-
-                self.standard_print("INFO", "找到下载链接列表表格")
-
-                first_download_btn = None
-                for attempt in range(3):
-                    if await self.check_stop(worker):
-                        print("查找下载按钮时检测到停止指令")
-                        return None, None
-                    if await self.check_pause(worker):
-                        print("查找下载按钮时检测到暂停指令")
-                        return None, None
-                    first_download_btn = await browser.query_element(
-                        '//*[@id="content-div"]/div[1]/div[4]/div/div/table/tbody/tr[2]/td[5]/a',
-                        timeout=5, raise_exc=False
-                    )
-                    if first_download_btn:
-                        break
-                    await asyncio.sleep(1)
-
-                if not first_download_btn:
-                    print("未找到第一个下载按钮")
-                    return None, None
-
-                download_url = first_download_btn.get_attribute('data-url')
-                filename = first_download_btn.get_attribute('download')
-                if not filename:
-                    filename = await first_download_btn.text
-
-                if filename:
-                    filename = filename.strip()
-                    if not filename.endswith('.mp4'):
-                        filename += '.mp4'
-
-                self.standard_print("SUCCESS", f"提取到下载链接: {download_url}")
-                self.standard_print("INFO", f"提取到文件名: {filename}")
-
-                return download_url, filename
-
-            except Exception as e:
-                self.standard_print("ERROR", f"提取下载信息时出错: {e}")
-                import traceback
-                traceback.print_exc()
+            logger.info(f"访问下载页面: {download_page_url}")
+            await browser.go_to(download_page_url, use_bypass=use_bypass)
+            # 等待表格出现
+            table_element = await browser.wait_for_element(
+                '//*[@id="content-div"]/div[1]/div[4]/div/div/table',
+                timeout=10
+            )
+            if not table_element:
+                logger.warning("未找到下载链接列表表格")
                 return None, None
 
+            logger.info("找到下载链接列表表格")
+
+            # 查找下载按钮
+            first_download_btn = await browser.wait_for_element(
+                '//*[@id="content-div"]/div[1]/div[4]/div/div/table/tbody/tr[2]/td[5]/a',
+                timeout=5
+            )
+            if not first_download_btn:
+                logger.warning("未找到第一个下载按钮")
+                return None, None
+
+            download_url = first_download_btn.get_attribute('data-url')
+            filename = first_download_btn.get_attribute('download')
+            if not filename:
+                filename = await first_download_btn.text
+
+            if filename:
+                filename = filename.strip()
+                if not filename.endswith('.mp4'):
+                    filename += '.mp4'
+
+            logger.info(f"提取到下载链接: {download_url}")
+            logger.info(f"提取到文件名: {filename}")
+
+            return download_url, filename
+
+        except Exception as e:
+            logger.exception("提取下载信息时出错")
+            return None, None
         finally:
             if need_close and browser:
                 await browser.close()
 
     def download_video(self, video_url: str, filename: str, worker=None, task_logger=None, task_id=None) -> bool:
         if not video_url or not filename:
-            self.standard_print("WARNING", "下载链接或文件名为空，跳过下载")
+            logger.warning("下载链接或文件名为空，跳过下载")
             return False
 
         safe_filename = self._sanitize_filename(filename)
@@ -169,7 +139,7 @@ class VideoDownloader:
         final_file_path = os.path.join(self.download_dir, safe_filename)
 
         if os.path.exists(final_file_path):
-            self.standard_print("INFO", f"文件已存在，跳过下载: {final_file_path}")
+            logger.info(f"文件已存在，跳过下载: {final_file_path}")
             if task_logger and task_id:
                 task_logger.add_downloaded_video(task_id, safe_filename)
                 if self.progress_callback:
@@ -177,30 +147,30 @@ class VideoDownloader:
             return True
 
         if os.path.exists(downloading_file_path):
-            self.standard_print("WARNING", f"发现之前的下载中文件: {downloading_file_path}")
+            logger.warning(f"发现之前的下载中文件: {downloading_file_path}")
             try:
                 os.remove(downloading_file_path)
-                self.standard_print("INFO", "已删除之前的下载中文件")
+                logger.info("已删除之前的下载中文件")
             except Exception as e:
-                self.standard_print("ERROR", f"删除之前下载文件失败: {e}")
+                logger.error(f"删除之前下载文件失败: {e}")
                 return False
 
-        self.standard_print("INFO", f"开始下载: {safe_filename} (临时文件: {downloading_filename})")
+        logger.info(f"开始下载: {safe_filename} (临时文件: {downloading_filename})")
 
         if self.progress_callback:
             self.progress_callback(safe_filename, "0%")
 
         retry_count = 0
-        CHECK_INTERVAL = 10  # 每10个块检查一次暂停/停止
+        CHECK_INTERVAL = 0.5  # 每0.5秒检查一次暂停/停止
 
         while retry_count < self.max_retries:
             try:
-                response = requests.get(video_url, stream=True, timeout=30)
+                response = self.session.get(video_url, stream=True, timeout=30)
                 response.raise_for_status()
 
                 total_size = int(response.headers.get('content-length', 0))
                 downloaded_size = 0
-                chunk_counter = 0
+                last_check_time = time.time()
 
                 os.makedirs(self.download_dir, exist_ok=True)
 
@@ -209,22 +179,24 @@ class VideoDownloader:
                         if chunk:
                             f.write(chunk)
                             downloaded_size += len(chunk)
-                            chunk_counter += 1
 
-                            if chunk_counter % CHECK_INTERVAL == 0:
+                            # 基于时间检查暂停/停止
+                            now = time.time()
+                            if now - last_check_time >= CHECK_INTERVAL:
+                                last_check_time = now
                                 if worker and hasattr(worker, 'should_stop') and worker.should_stop():
-                                    self.standard_print("WARNING", "\n下载已被停止")
+                                    logger.warning("下载已被停止")
                                     response.close()
                                     if os.path.exists(downloading_file_path):
                                         try:
                                             os.remove(downloading_file_path)
-                                            self.standard_print("INFO", "已删除临时文件")
+                                            logger.info("已删除临时文件")
                                         except Exception as e:
-                                            self.standard_print("ERROR", f"删除临时文件失败: {e}")
+                                            logger.error(f"删除临时文件失败: {e}")
                                     return False
 
                                 if worker and hasattr(worker, 'should_pause') and worker.should_pause():
-                                    self.standard_print("WARNING", "\n下载已被暂停")
+                                    logger.warning("下载已被暂停")
                                     while worker.should_pause() and not worker.should_stop():
                                         time.sleep(0.1)
                                     if worker.should_stop():
@@ -235,21 +207,19 @@ class VideoDownloader:
                                 progress_str = f"{progress:.1f}% ({self._format_size(downloaded_size)}/{self._format_size(total_size)})"
                                 if self.progress_callback:
                                     self.progress_callback(safe_filename, progress_str)
-                                print(f"\r{safe_filename}: {progress_str}", end='')
                             else:
                                 if self.progress_callback:
                                     self.progress_callback(safe_filename, f"{self._format_size(downloaded_size)}")
-                                print(f"\r{safe_filename}: {self._format_size(downloaded_size)}", end='')
 
-                self.standard_print("INFO", "\n下载完成，正在重命名文件...")
+                logger.info("下载完成，正在重命名文件...")
 
                 try:
-                    os.replace(downloading_file_path, final_file_path)  # 原子操作
-                    self.standard_print("SUCCESS", f"文件重命名完成: {final_file_path}")
+                    os.replace(downloading_file_path, final_file_path)
+                    logger.info(f"文件重命名完成: {final_file_path}")
                     if self.progress_callback:
                         self.progress_callback(safe_filename, "100.0%")
                 except Exception as e:
-                    self.standard_print("ERROR", f"文件重命名失败: {e}")
+                    logger.error(f"文件重命名失败: {e}")
                     return False
 
                 if task_logger and task_id:
@@ -259,29 +229,28 @@ class VideoDownloader:
 
             except Exception as e:
                 retry_count += 1
-                self.standard_print("WARNING", f"下载失败 (重试 {retry_count}/{self.max_retries}): {e}")
+                wait_time = min(2 ** retry_count, 30)  # 指数退避
+                logger.warning(f"下载失败 (重试 {retry_count}/{self.max_retries})，等待 {wait_time} 秒: {e}")
                 if retry_count >= self.max_retries:
-                    self.standard_print("ERROR", f"下载最终失败: {e}")
-                    import traceback
-                    traceback.print_exc()
+                    logger.error("下载最终失败")
                     return False
                 else:
-                    time.sleep(2)
+                    time.sleep(wait_time)
 
         return False
 
-    async def download_from_page(self, download_page_url: str, worker=None, task_logger=None, task_id=None) -> bool:
-        video_url, filename = await self.extract_download_info(download_page_url, worker)
+    async def download_from_page(self, download_page_url: str, worker=None, task_logger=None, task_id=None,
+                                 use_bypass: bool = False) -> bool:
+        video_url, filename = await self.extract_download_info(download_page_url, worker, use_bypass=use_bypass)
         if video_url and filename:
-            success = self.download_video(video_url, filename, worker, task_logger, task_id)
-            return success
+            return self.download_video(video_url, filename, worker, task_logger, task_id)
         else:
-            self.standard_print("WARNING", "无法提取下载信息")
+            logger.warning("无法提取下载信息")
             return False
 
 
 class HanimeScraper:
-    def __init__(self, max_workers=2, headless=True, download_dir="./downloads", task_logger=None, task_id=None, config_manager=None):
+    def __init__(self, max_workers=2, headless=True, download_dir="./downloads", task_logger=None, task_id=None, config_manager=None, use_bypass=False):
         self.all_video_links = set()
         self.download_links = []
         self.downloader = VideoDownloader(download_dir=download_dir, headless=headless)
@@ -290,6 +259,7 @@ class HanimeScraper:
         self.task_id = task_id
         self.headless = headless
         self.config_manager = config_manager
+        self.use_bypass = use_bypass  # 新增：是否使用Bypass模式
 
         self.link_queue = queue.Queue()
         self.results = []
@@ -304,17 +274,22 @@ class HanimeScraper:
 
         self.failed_links = []
 
-        # 使用 weakref.WeakSet 管理浏览器，避免手动追踪
-        self._active_browsers = weakref.WeakSet()
+        # 使用普通 set 管理浏览器实例，关闭后移除
+        self._active_browsers = set()
         self._browsers_lock = threading.Lock()
 
-    async def _track_browser(self, browser: BrowserManager):
+    def _track_browser(self, browser: BrowserManager):
         """注册浏览器管理器"""
         with self._browsers_lock:
             self._active_browsers.add(browser)
 
+    def _untrack_browser(self, browser: BrowserManager):
+        """注销浏览器管理器"""
+        with self._browsers_lock:
+            self._active_browsers.discard(browser)
+
     async def close_all_browsers(self):
-        """强制关闭所有被追踪的浏览器实例"""
+        """强制关闭所有被追踪的浏览器实例（线程安全）"""
         browsers_to_close = []
         with self._browsers_lock:
             browsers_to_close = list(self._active_browsers)
@@ -324,7 +299,7 @@ class HanimeScraper:
             try:
                 await browser.close()
             except Exception as e:
-                print(f"关闭浏览器失败: {e}")
+                logger.error(f"关闭浏览器失败: {e}")
 
     def get_failed_links(self):
         with self.lock:
@@ -361,35 +336,22 @@ class HanimeScraper:
             return worker.should_stop()
         return False
 
-    def standard_print(self, level: str, message: str) -> None:
-        timestamp = time.strftime("%H:%M:%S")
-        print(f"[{timestamp}] {level.upper()} - {message}")
-
     async def get_video_links(self, start_url: str, worker=None) -> List[str]:
         if await self.check_stop(worker):
-            self.standard_print("WARNING", "获取视频链接前检测到停止指令")
+            logger.warning("获取视频链接前检测到停止指令")
             return []
         if await self.check_pause(worker):
-            self.standard_print("WARNING", "获取视频链接前检测到暂停指令")
+            logger.warning("获取视频链接前检测到暂停指令")
             return []
 
         async with BrowserManager(headless=self.headless, download_dir=self.downloader.download_dir,
                                  config_manager=self.config_manager) as browser:
-            await self._track_browser(browser)
+            self._track_browser(browser)
             try:
-                # 首次尝试不使用 bypass
+                # 抓取链接时始终不使用 bypass
                 await browser.go_to(start_url, use_bypass=False)
-                await asyncio.sleep(3)
-
-                if await self.check_stop(worker):
-                    self.standard_print("WARNING", "页面加载后检测到停止指令")
-                    return []
-                if await self.check_pause(worker):
-                    self.standard_print("WARNING", "页面加载后检测到暂停指令")
-                    return []
-
-                playlist_container = await browser.query_element('//*[@id="playlist-scroll"]', timeout=10, raise_exc=False)
-
+                # 等待 playlist-scroll 出现
+                playlist_container = await browser.wait_for_element('//*[@id="playlist-scroll"]', timeout=10)
                 if playlist_container:
                     link_elements = await browser.find_element(
                         xpath='//*[@id="playlist-scroll"]//a[@href]',
@@ -400,11 +362,7 @@ class HanimeScraper:
 
                     if link_elements:
                         for element in link_elements:
-                            if await self.check_stop(worker):
-                                self.standard_print("WARNING", "处理视频链接时检测到停止指令")
-                                return list(self.all_video_links)
-                            if await self.check_pause(worker):
-                                self.standard_print("WARNING", "处理视频链接时检测到暂停指令")
+                            if await self.check_stop(worker) or await self.check_pause(worker):
                                 return list(self.all_video_links)
 
                             try:
@@ -415,15 +373,10 @@ class HanimeScraper:
                             if href and isinstance(href, str) and href.startswith('https://hanime1.me/watch?v='):
                                 self.all_video_links.add(href)
                 else:
-                    self.standard_print("WARNING", "未找到playlist-scroll容器")
+                    logger.warning("未找到playlist-scroll容器")
 
                 video_links_list = list(self.all_video_links)
-                if video_links_list:
-                    self.standard_print("INFO", f"获取到 {len(video_links_list)} 个视频链接:")
-                    for i, link in enumerate(video_links_list, 1):
-                        self.standard_print("INFO", f"  {i}. {link}")
-                else:
-                    self.standard_print("WARNING", "未获取到任何视频链接")
+                logger.info(f"获取到 {len(video_links_list)} 个视频链接")
 
                 if self.task_logger and self.task_id:
                     self.task_logger.add_video_links(self.task_id, video_links_list)
@@ -431,7 +384,7 @@ class HanimeScraper:
                 return video_links_list
 
             finally:
-                pass  # 浏览器由上下文管理器自动关闭
+                self._untrack_browser(browser)
 
     def update_progress(self, filename: str, progress: str):
         with self.downloading_files_lock:
@@ -481,7 +434,7 @@ class HanimeScraper:
                         self.failed_links.append(original_url)
                 return False
         except Exception as e:
-            self.standard_print("ERROR", f"下载视频时发生异常: {e}")
+            logger.exception(f"下载视频时发生异常")
             self.remove_progress(safe_filename)
             if self.task_logger and self.task_id:
                 self.task_logger.add_failed_link(self.task_id, original_url, f"exception:{str(e)}")
@@ -492,18 +445,14 @@ class HanimeScraper:
 
     async def _process_single_link_with_browser(self, video_url: str, browser: BrowserManager,
                                                 worker) -> bool:
-        """
-        使用给定的浏览器实例处理单个链接，直接处理下载页面
-        """
-        original_watch_url = video_url  # 保存原始链接（可能是watch或download）
+        original_watch_url = video_url
         if '/watch?' in video_url:
             download_url = video_url.replace('/watch?', '/download?')
         else:
             download_url = video_url
 
-        self.standard_print("INFO", f"处理链接: {download_url}")
+        logger.info(f"处理链接: {download_url}")
 
-        # 提取视频ID用于显示
         video_id_match = re.search(r'download\?v=([^&]+)', download_url)
         if video_id_match:
             display_text = f"正在处理: {video_id_match.group(1)}"
@@ -512,62 +461,35 @@ class HanimeScraper:
         self.add_processing(original_watch_url, display_text)
 
         if await self.check_stop(worker):
-            self.standard_print("WARNING", "处理链接前检测到停止指令")
+            logger.warning("处理链接前检测到停止指令")
             self.remove_processing(original_watch_url)
             return False
         if await self.check_pause(worker):
-            self.standard_print("WARNING", "处理链接前检测到暂停指令")
+            logger.warning("处理链接前检测到暂停指令")
             self.remove_processing(original_watch_url)
             return False
 
-        # 最多尝试两次：第一次不使用 bypass，第二次使用 bypass
-        for attempt, use_bypass in enumerate([False, True]):
-            try:
-                if await self.check_stop(worker) or await self.check_pause(worker):
-                    self.remove_processing(original_watch_url)
-                    return False
+        try:
+            # 根据 use_bypass 决定是否启用绕过
+            video_url_real, filename = await self.downloader.extract_download_info(
+                download_url, worker, browser=browser, use_bypass=self.use_bypass
+            )
+            if not video_url_real or not filename:
+                self.remove_processing(original_watch_url)
+                return False
 
-                # 提取下载信息（复用浏览器）
-                video_url_real, filename = await self.downloader.extract_download_info(
-                    download_url, worker, browser=browser
-                )
-                if not video_url_real or not filename:
-                    if attempt == 0:
-                        self.standard_print("WARNING", f"提取信息失败，可能遇到验证码，准备使用 bypass 重试: {download_url}")
-                        continue
-                    else:
-                        self.standard_print("WARNING", f"✗ 提取下载信息失败: {download_url}")
-                        self.remove_processing(original_watch_url)
-                        if self.task_logger and self.task_id:
-                            self.task_logger.add_failed_link(self.task_id, original_watch_url, "extract_info_failed")
-                        with self.lock:
-                            self.failed_links.append(original_watch_url)
-                        return False
+            return self._handle_video_download(video_url_real, filename, worker, original_watch_url)
 
-                # 下载视频
-                return self._handle_video_download(video_url_real, filename, worker, original_watch_url)
-
-            except Exception as e:
-                self.standard_print("ERROR", f"处理链接 {download_url} 时出错: {e}")
-                if attempt == 0:
-                    self.standard_print("WARNING", "尝试启用 bypass 重试")
-                    continue
-                else:
-                    self.remove_processing(original_watch_url)
-                    if self.task_logger and self.task_id:
-                        self.task_logger.add_failed_link(self.task_id, original_watch_url, f"browser_error:{str(e)}")
-                    with self.lock:
-                        self.failed_links.append(original_watch_url)
-                    return False
-
-        # 如果执行到这里，说明两次都失败了
-        self.remove_processing(original_watch_url)
-        return False
+        except Exception as e:
+            logger.exception(f"处理链接 {download_url} 时出错")
+            self.remove_processing(original_watch_url)
+            if self.task_logger and self.task_id:
+                self.task_logger.add_failed_link(self.task_id, original_watch_url, f"browser_error:{str(e)}")
+            with self.lock:
+                self.failed_links.append(original_watch_url)
+            return False
 
     def _process_worker(self, worker):
-        """
-        工作线程函数，每个线程持有一个浏览器实例，循环处理多个链接
-        """
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
 
@@ -576,27 +498,30 @@ class HanimeScraper:
                 async with BrowserManager(headless=self.headless,
                                          download_dir=self.downloader.download_dir,
                                          config_manager=self.config_manager) as browser:
-                    await self._track_browser(browser)
-                    while True:
-                        try:
-                            video_url = self.link_queue.get(timeout=1)
-                        except queue.Empty:
-                            if self.link_queue.unfinished_tasks == 0:
-                                break
-                            continue
+                    self._track_browser(browser)
+                    try:
+                        while True:
+                            try:
+                                video_url = self.link_queue.get(timeout=1)
+                            except queue.Empty:
+                                if self.link_queue.unfinished_tasks == 0:
+                                    break
+                                continue
 
-                        try:
-                            success = await self._process_single_link_with_browser(
-                                video_url, browser, worker
-                            )
-                            with self.lock:
-                                self.results.append(success)
-                        except Exception as e:
-                            self.standard_print("ERROR", f"线程处理链接失败: {video_url}, 错误: {e}")
-                            with self.lock:
-                                self.results.append(False)
-                        finally:
-                            self.link_queue.task_done()
+                            try:
+                                success = await self._process_single_link_with_browser(
+                                    video_url, browser, worker
+                                )
+                                with self.lock:
+                                    self.results.append(success)
+                            except Exception as e:
+                                logger.exception(f"线程处理链接失败: {video_url}")
+                                with self.lock:
+                                    self.results.append(False)
+                            finally:
+                                self.link_queue.task_done()
+                    finally:
+                        self._untrack_browser(browser)
 
             loop.run_until_complete(run())
         finally:
@@ -606,14 +531,12 @@ class HanimeScraper:
             self.active_threads -= 1
 
     async def process_links_batch(self, links_batch: List[str], worker=None) -> None:
-        self.standard_print("INFO", f"开始批量处理 {len(links_batch)} 个链接，使用 {self.max_workers} 个工作线程（复用浏览器）")
+        logger.info(f"开始批量处理 {len(links_batch)} 个链接，使用 {self.max_workers} 个工作线程")
 
-        # 清空队列
         while not self.link_queue.empty():
             self.link_queue.get_nowait()
             self.link_queue.task_done()
 
-        # 将所有链接转换为下载页面链接后放入队列
         for link in links_batch:
             if '/watch?' in link:
                 download_link = link.replace('/watch?', '/download?')
@@ -636,7 +559,7 @@ class HanimeScraper:
             thread.join()
 
         success_count = sum(1 for r in self.results if r)
-        self.standard_print("INFO", f"处理完成: 成功 {success_count}/{len(links_batch)} 个链接")
+        logger.info(f"处理完成: 成功 {success_count}/{len(links_batch)} 个链接")
 
 
 class DownloadWorker(QThread):
@@ -647,18 +570,19 @@ class DownloadWorker(QThread):
     count_updated_signal = pyqtSignal()
 
     # 进度节流相关
-    _last_progress_time = {}  # 文件名 -> 上次发送时间
+    _last_progress_time = {}
     _progress_lock = threading.Lock()
 
-    def __init__(self, url: str, download_dir: str, headless: bool, task_logger=None, task_id=None, config_manager=None, is_restored=False):
+    def __init__(self, url: str, download_dir: str, headless: bool, use_bypass: bool, task_logger=None, task_id=None, config_manager=None, is_restored=False):
         super().__init__()
         self.url = url
         self.download_dir = download_dir
         self.headless = headless
+        self.use_bypass = use_bypass  # 新增：是否使用Bypass
         self._is_running = True
         self._is_paused = False
-        self._pause_event = threading.Event()      # 用于暂停等待
-        self._pause_event.set()                     # 初始为未暂停
+        self._pause_event = threading.Event()
+        self._pause_event.set()
         self.task_logger = task_logger
         self.task_id = task_id
         self.config_manager = config_manager
@@ -668,6 +592,7 @@ class DownloadWorker(QThread):
         self.retry_failed_links = False
         self.failed_links_to_retry = []
         self.is_restored = is_restored
+        self._loop = None  # 新增：保存事件循环引用
 
         if task_logger and task_id:
             self.failed_links_to_retry = task_logger.get_task_failed_links(task_id)
@@ -676,10 +601,12 @@ class DownloadWorker(QThread):
     def run(self):
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
+        self._loop = loop  # 保存事件循环
         try:
             self.log_signal.emit(f"开始处理链接: {self.url}")
             self._detect_headless_setting()
             self.log_signal.emit(f"当前无头模式设置: {'启用' if self.headless else '禁用'}")
+            self.log_signal.emit(f"当前Bypass模式设置: {'启用' if self.use_bypass else '禁用'}")
 
             self.scraper = HanimeScraper(
                 max_workers=2,
@@ -687,7 +614,8 @@ class DownloadWorker(QThread):
                 download_dir=self.download_dir,
                 task_logger=self.task_logger,
                 task_id=self.task_id,
-                config_manager=self.config_manager
+                config_manager=self.config_manager,
+                use_bypass=self.use_bypass  # 传递Bypass标志
             )
 
             self.scraper.downloader.set_progress_callback(self.on_progress_update)
@@ -705,23 +633,19 @@ class DownloadWorker(QThread):
             error_msg = f"下载任务出错: {str(e)}"
             self.log_signal.emit(error_msg)
             self.last_error = error_msg
-
+            logger.exception("下载任务异常")
             if self.task_logger and self.task_id:
                 self.task_logger.add_failed_link(self.task_id, self.url, "download_error")
-
-            import traceback
-            traceback.print_exc()
             self.finished_signal.emit(False)
         finally:
-            loop.close()
+            # 确保所有浏览器已关闭（同步等待）
             if self.scraper:
                 try:
-                    loop = asyncio.new_event_loop()
-                    asyncio.set_event_loop(loop)
                     loop.run_until_complete(self.scraper.close_all_browsers())
-                    loop.close()
                 except Exception as e:
-                    print(f"关闭浏览器时出错: {e}")
+                    logger.error(f"关闭浏览器时出错: {e}")
+            loop.close()
+            self._loop = None  # 清除引用
 
     def on_progress_update(self, filename: str, progress: str):
         current_time = time.time()
@@ -765,9 +689,7 @@ class DownloadWorker(QThread):
         else:
             video_links = await self.scraper.get_video_links(self.url, self)
 
-        if self.should_stop():
-            return False
-        if self.should_pause():
+        if self.should_stop() or self.should_pause():
             return False
 
         if not video_links:
@@ -776,7 +698,6 @@ class DownloadWorker(QThread):
 
         if self.retry_failed_links and self.failed_links_to_retry:
             self.log_signal.emit(f"开始重试 {len(self.failed_links_to_retry)} 个失败的链接...")
-            # 失败链接为原始 watch 链接，process_links_batch 内部会转换
             await self.scraper.process_links_batch(self.failed_links_to_retry, self)
 
             remaining_failed = self.scraper.get_failed_links()
@@ -814,14 +735,9 @@ class DownloadWorker(QThread):
     def stop(self):
         self._is_running = False
         self._pause_event.set()
-        if self.scraper:
-            try:
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                loop.run_until_complete(self.scraper.close_all_browsers())
-                loop.close()
-            except Exception as e:
-                print(f"停止时关闭浏览器出错: {e}")
+        # 向工作线程的事件循环投递关闭浏览器的任务，立即中断阻塞操作
+        if self.scraper and self._loop and self._loop.is_running():
+            asyncio.run_coroutine_threadsafe(self.scraper.close_all_browsers(), self._loop)
 
     def pause(self):
         self._is_paused = True

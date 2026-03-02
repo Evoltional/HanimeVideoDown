@@ -1,9 +1,12 @@
 import json
 import os
 import threading
+import logging
 from datetime import datetime
 from enum import Enum
 from typing import Dict, List, Any
+
+logger = logging.getLogger(__name__)
 
 
 class LogLevel(Enum):
@@ -32,6 +35,7 @@ class TaskLogger:
                 "downloaded_videos": [],
                 "failed_links": [],
                 "failure_type": "",
+                "total_video_count": 0,  # 新增字段，保存视频总数
                 "created_at": datetime.now().isoformat(),
                 "updated_at": datetime.now().isoformat()
             }
@@ -59,6 +63,7 @@ class TaskLogger:
             tasks = self._load_tasks()
             if task_id in tasks:
                 tasks[task_id]["video_links"] = video_links
+                tasks[task_id]["total_video_count"] = len(video_links)  # 记录总数
                 tasks[task_id]["updated_at"] = datetime.now().isoformat()
                 self._save_tasks(tasks)
 
@@ -176,7 +181,7 @@ class TaskLogger:
                 files = os.listdir(download_dir)
                 downloading_files = [f for f in files if f.startswith('下载中_') and f.endswith('.mp4')]
         except Exception as e:
-            print(f"扫描下载目录时出错: {e}")
+            logger.error(f"扫描下载目录时出错: {e}")
         return downloading_files
 
     def clear_all_tasks(self) -> None:
@@ -213,11 +218,11 @@ class TaskLogger:
             with open(self.config_file, 'w', encoding='utf-8') as f:
                 json.dump(tasks, f, indent=4, ensure_ascii=False)
         except Exception as e:
-            self.log(LogLevel.ERROR, f"保存任务日志失败: {e}")
+            logger.error(f"保存任务日志失败: {e}")
 
     def log(self, level: LogLevel, message: str) -> None:
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        print(f"[{timestamp}] {level.value} - {message}")
+        logger.log(getattr(logging, level.value), f"{timestamp} - {message}")
 
     def get_plain_log_message(self, level: LogLevel, message: str) -> str:
         timestamp = datetime.now().strftime("%H:%M:%S")
