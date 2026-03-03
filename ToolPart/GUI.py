@@ -376,16 +376,22 @@ class TaskManager:
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
+        print("1. 开始初始化配置")
         self.config_manager = ConfigManager()
+        print("2. 配置加载完成")
         self.task_logger = TaskLogger()
+        print("3. TaskLogger初始化完成")
         self.step_trackers: Dict[str, List[StepTracker]] = {}
+        print("4. 步骤追踪器初始化完成")
         self.performance_optimizer = PerformanceOptimizer()
 
         window_pos = self.config_manager.get("window_position", [100, 100])
         window_size = self.config_manager.get("window_size", [1000, 800])
+        print(f"5. 设置窗口位置: {window_pos}, 窗口大小: {window_size}")
         self.setGeometry(window_pos[0], window_pos[1], window_size[0], window_size[1])
+        print("6. 设置窗口完成")
         self.setWindowTitle("Hanime视频下载器")
-
+        print("7. 设置窗口标题完成")
         self.setStyleSheet("""
             QMainWindow {
                 background-color: #2c3e50;
@@ -472,14 +478,17 @@ class MainWindow(QMainWindow):
                 background-color: #3498db;
             }
         """)
-
+        print("8. 设置样式表完成")
         self.download_dir = self.config_manager.get("download_dir", os.path.join(os.getcwd(), "Download"))
+        print(f"9. 设置下载目录为: {self.download_dir}")
         self.headless_mode = self.config_manager.get("headless_mode", True)
+        print(f"10. 设置无头模式为: {self.headless_mode}")
         self.bypass_mode = self.config_manager.get("bypass_mode", False)  # 读取Bypass设置
-
+        print(f"11. 读取Bypass设置: {self.bypass_mode}")
         self.task_manager = TaskManager(max_active_tasks=2, task_logger=self.task_logger)
-
+        print("12. 初始化任务管理器完成")
         self.init_ui()
+        print("13. 初始化UI完成")
         self.restore_incomplete_tasks()
 
     def update_task_count(self, worker: DownloadWorker):
