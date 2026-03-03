@@ -213,20 +213,19 @@ class TaskManager:
         if not task_id:
             return
         task_info = self.task_info_map[task_id]
-
+    
         if hasattr(worker, 'stop'):
             worker.stop()
         if hasattr(worker, '_pause_event'):
             worker._pause_event.set()
-
+    
         if worker.isRunning():
             if not worker.wait(5000):
-                logger.warning(f"任务 {task_id} 线程在5秒内未停止")
-
+                logger.warning(f"任务 {task_id} 线程在 5 秒内未停止")
+    
         task_info['status'] = self.STATUS_STOPPED
         self._set_task_ui_stopped(task_info['task_frame'])
-        if self.task_logger:
-            self.task_logger.update_task_status(task_id, 'stopped')
+        # 注意：不再在这里调用 task_logger.update_task_status，由 GUI 层处理
         self._try_start_pending_tasks()
 
     def remove_task(self, worker):
@@ -357,8 +356,7 @@ class TaskManager:
         for task_info in self.task_info_map.values():
             task_info['status'] = self.STATUS_STOPPED
             self._set_task_ui_stopped(task_info['task_frame'])
-            if self.task_logger:
-                self.task_logger.update_task_status(task_info['task_id'], 'stopped')
+            # 注意：不再在这里调用 task_logger.update_task_status，由 GUI 层统一处理
 
     def clear_all_tasks(self):
         try:
@@ -1158,16 +1156,17 @@ class MainWindow(QMainWindow):
             self.log_message("未找到要恢复的任务")
             return
 
-        # 如果任务是已停止状态，则重新创建 worker 并替换
+        # 如果任务是已停止状态，则重新创建 worker 并替换（清空所有状态重新开始）
         if task_info['status'] == TaskManager.STATUS_STOPPED:
-            self.log_message(f"任务已停止，正在重新启动...")
+            self.log_message(f"任务已停止，正在清空所有状态并重新启动...")
             # 获取原任务信息
             url = task_info['url']
             download_dir = task_info['worker'].download_dir
             # 删除旧的 task_frame 和 worker（从 UI 和映射中移除）
             self.delete_task(task_info['task_frame'], task_info['worker'])
-            # 以 PENDING 状态重新创建任务，使用当前配置
+            # 以 PENDING 状态重新创建任务，使用当前配置（完全重新开始）
             self.restore_task(task_id, url, download_dir, status=TaskManager.STATUS_PENDING)
+            self.log_message(f"任务已清空所有状态并重新开始 (ID: {task_id[:8]})")
             return
 
         # 原有逻辑：处理暂停或失败的任务
@@ -1188,13 +1187,16 @@ class MainWindow(QMainWindow):
                 break
 
         if task_info:
+            # 停止任务并清理资源
             self.task_manager.stop_task(worker)
             self._cleanup_task_completely(worker, task_id)
+            
+            # 清空任务的所有状态和信息
+            self._clear_task_state_completely(task_id)
+            
             task_info['status'] = TaskManager.STATUS_STOPPED
             self.task_manager._set_task_ui_stopped(task_info['task_frame'])
-            if self.task_manager.task_logger and task_id:
-                self.task_manager.task_logger.update_task_status(task_id, 'stopped')
-            self.log_message(f"已停止任务")
+            self.log_message(f"已停止任务，所有状态和信息已清空")
         else:
             self.log_message("未找到要停止的任务")
 
@@ -1203,22 +1205,37 @@ class MainWindow(QMainWindow):
 
         if has_tasks_to_stop:
             self.log_message("正在停止所有任务，请稍候...")
+            # 先停止所有任务
             self.task_manager.stop_all_tasks()
-            self._cleanup_all_tasks_completely()
-            self.log_message("已停止所有下载任务，资源已清理完成")
+            # 然后清理每个任务的资源和状态
+            for task_id, task_info in list(self.task_manager.task_info_map.items()):
+                self._cleanup_task_completely(task_info['worker'], task_id)
+                self._clear_task_state_completely(task_id)
+            self.log_message("已停止所有下载任务，所有状态和信息已清空")
         else:
             self.log_message("没有可停止的任务")
 
+    def _clear_task_state_completely(self, task_id: str) -> None:
+        """清空任务的所有状态和信息"""
+        try:
+            if self.task_logger and task_id:
+                # 从 TaskLogger 中删除任务
+                self.task_logger.remove_task(task_id)
+                self.log_message(f"已从 TaskLogger 删除任务 {task_id[:8]}")
+        except Exception as e:
+            logger.error(f"清空任务状态时出错：{e}")
+            self.log_message(f"清空任务状态时出错：{str(e)}", "ERROR")
+    
     def _cleanup_task_completely(self, worker: DownloadWorker, task_id: str) -> None:
         try:
             if hasattr(worker, 'stop'):
                 worker.stop()
             if worker.isRunning():
                 worker.wait(5000)
-
+    
             self._close_browser_instances(worker)
             self._delete_temporary_files(worker, task_id)
-
+    
             if hasattr(worker, 'scraper') and worker.scraper:
                 if hasattr(worker.scraper, 'downloading_files'):
                     worker.scraper.downloading_files.clear()
@@ -1226,10 +1243,10 @@ class MainWindow(QMainWindow):
                     worker.scraper.failed_links.clear()
                 if hasattr(worker.scraper, 'results'):
                     worker.scraper.results.clear()
-
+    
             self.log_message(f"任务 {task_id[:8]} 的资源已彻底清理")
         except Exception as e:
-            self.log_message(f"清理任务资源时出错: {str(e)}", "ERROR")
+            self.log_message(f"清理任务资源时出错：{str(e)}", "ERROR")
             logger.error("清理任务资源时出错", exc_info=True)
 
     def _close_browser_instances(self, worker: DownloadWorker) -> None:

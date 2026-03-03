@@ -1,6 +1,5 @@
 import asyncio
 import logging
-from typing import Optional
 
 from pydoll.browser.chromium import Chrome
 from pydoll.browser.options import ChromiumOptions
@@ -13,22 +12,24 @@ class BrowserManager:
 
     def __init__(self, headless: bool = True, download_dir: str = "./downloads",
                  timeout: int = 30, page_load_timeout: int = 60,
-                 config_manager=None):
+                 config_manager=None, use_bypass: bool = False):
         """
         初始化浏览器管理器
-
+    
         Args:
             headless: 是否使用无头模式
             download_dir: 下载目录
-            timeout: 操作超时时间(秒)
-            page_load_timeout: 页面加载超时时间(秒)
+            timeout: 操作超时时间 (秒)
+            page_load_timeout: 页面加载超时时间 (秒)
             config_manager: 配置管理器实例
+            use_bypass: 是否启用 Bypass模式（Cloudflare 验证码绕过）
         """
         self.headless = headless
         self.download_dir = download_dir
         self.timeout = timeout
         self.page_load_timeout = page_load_timeout
         self.config_manager = config_manager
+        self.use_bypass = use_bypass  # 新增：记录是否启用 Bypass模式
         self.browser = None
         self.tab = None
         self._is_running = False
@@ -41,12 +42,19 @@ class BrowserManager:
             await self.browser.__aenter__()
             self.tab = await self.browser.start()
             await self.tab.enable_page_events()
-            await self.tab.enable_auto_solve_cloudflare_captcha()
+            
+            # 只有启用 Bypass模式时才开启自动验证码处理
+            if self.use_bypass:
+                logger.info("启用 Cloudflare 验证码自动处理")
+                await self.tab.enable_auto_solve_cloudflare_captcha()
+            else:
+                logger.info("禁用 Cloudflare 验证码自动处理（普通模式）")
+            
             self._is_running = True
             logger.info("浏览器启动成功")
             return True
         except Exception as e:
-            logger.exception("启动浏览器失败")
+            logger.exception(f"启动浏览器失败：{e}")
             return False
 
     def _create_chrome_options(self) -> ChromiumOptions:
@@ -235,12 +243,14 @@ class BrowserManager:
 
 # 便捷函数
 async def create_browser(headless: bool = True, download_dir: str = "./downloads",
-                         timeout: int = 30, page_load_timeout: int = 60) -> BrowserManager:
+                         timeout: int = 30, page_load_timeout: int = 60,
+                         use_bypass: bool = False) -> BrowserManager:
     browser_manager = BrowserManager(
         headless=headless,
         download_dir=download_dir,
         timeout=timeout,
-        page_load_timeout=page_load_timeout
+        page_load_timeout=page_load_timeout,
+        use_bypass=use_bypass
     )
     if await browser_manager.start():
         return browser_manager

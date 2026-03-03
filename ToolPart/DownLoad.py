@@ -79,7 +79,7 @@ class VideoDownloader:
 
         need_close = False
         if browser is None:
-            browser = BrowserManager(headless=self.headless, download_dir=self.download_dir)
+            browser = BrowserManager(headless=self.headless, download_dir=self.download_dir, use_bypass=use_bypass)
             await browser.start()
             need_close = True
 
@@ -345,7 +345,7 @@ class HanimeScraper:
             return []
 
         async with BrowserManager(headless=self.headless, download_dir=self.downloader.download_dir,
-                                 config_manager=self.config_manager) as browser:
+                                 config_manager=self.config_manager, use_bypass=False) as browser:
             self._track_browser(browser)
             try:
                 # 抓取链接时始终不使用 bypass
@@ -497,7 +497,8 @@ class HanimeScraper:
             async def run():
                 async with BrowserManager(headless=self.headless,
                                          download_dir=self.downloader.download_dir,
-                                         config_manager=self.config_manager) as browser:
+                                         config_manager=self.config_manager,
+                                         use_bypass=self.use_bypass) as browser:
                     self._track_browser(browser)
                     try:
                         while True:
