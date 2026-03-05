@@ -305,12 +305,12 @@ class TaskManager:
     def _set_task_ui_stopped(self, task_frame):
         _update_task_ui_status(
             task_frame,
-            "状态: 已停止",
+            "状态：已停止",
             "#95a5a6",
             pause_enabled=False,
             pause_style="background-color: #7f8c8d;",
-            resume_enabled=False,
-            resume_style="background-color: #7f8c8d;",
+            resume_enabled=True,  # 停止后继续按钮可用
+            resume_style="",      # 使用默认样式（蓝色）
             stop_enabled=False   # 停止按钮禁用
         )
 
@@ -761,6 +761,7 @@ class MainWindow(QMainWindow):
             self.log_message("正在恢复所有暂停、失败和停止的任务...")
             # 获取所有未完成任务（状态不为 completed）
             all_tasks = self.task_logger.get_all_tasks()
+            resumed_count = 0
             for task_id, task_info in all_tasks.items():
                 if task_info.get("status") not in ["completed", "running"]:
                     # 如果任务已不在 UI 中（可能已停止且被清理），则重新创建
@@ -768,10 +769,18 @@ class MainWindow(QMainWindow):
                         self.restore_task(task_id, task_info["url"],
                                           task_info.get("download_dir", self.download_dir),
                                           status=task_info.get("status", TaskManager.STATUS_PAUSED))
+                        resumed_count += 1
                     else:
-                        # 对于已存在但暂停/失败的任务，恢复它们
+                        # 对于已存在但暂停/失败/停止的任务，恢复它们
                         existing_info = self.task_manager.task_info_map[task_id]
-                        self.resume_task(existing_info['worker'], force_retry=True)
+                        if existing_info['status'] in [TaskManager.STATUS_STOPPED, TaskManager.STATUS_PAUSED, TaskManager.STATUS_FAILED]:
+                            self.resume_task(existing_info['worker'], force_retry=True)
+                            resumed_count += 1
+            
+            if resumed_count == 0:
+                self.log_message("没有需要恢复的任务")
+            else:
+                self.log_message(f"已恢复 {resumed_count} 个任务")
             return
 
         self.url_input.clear()
@@ -824,17 +833,39 @@ class MainWindow(QMainWindow):
                 task_id = tid
                 task_info = info
                 break
-
+    
         if task_id is not None and task_info:
             url = task_info['url']
-
+    
             if success:
-                self.tasks_layout.removeWidget(task_info['task_frame'])
-                task_info['task_frame'].deleteLater()
-                self.task_manager.remove_task(sender)
-                self.log_message(f"下载任务已完成并已移除: {url}", "SUCCESS")
+                # 检查是否还有剩余链接（包括 failed_links）
+                has_remaining_links = False
+                if self.task_logger and task_id:
+                    remaining_links = self.task_logger.get_remaining_video_links(task_id)
+                    has_remaining_links = bool(remaining_links)
+                    
+                if has_remaining_links:
+                    # 还有剩余链接需要处理，保持任务存在
+                    self.log_message(f"下载任务完成，但仍有剩余链接需要处理：{url}")
+                    # 更新 UI 为待处理状态，等待处理剩余链接
+                    task_info['status'] = TaskManager.STATUS_PENDING
+                    self.task_manager._set_task_ui_pending(task_info['task_frame'])
+                    progress_frame = task_info['task_frame'].findChild(QFrame, "progress_frame")
+                    if progress_frame:
+                        left_progress = progress_frame.findChild(QLabel, "left_progress")
+                        if left_progress:
+                            remaining_count = len(remaining_links)
+                            left_progress.setText(f"剩余 {remaining_count} 个链接待处理")
+                    # 尝试启动下一个 pending 任务
+                    self.task_manager._try_start_pending_tasks()
+                else:
+                    # 所有链接都已完成，移除任务
+                    self.tasks_layout.removeWidget(task_info['task_frame'])
+                    task_info['task_frame'].deleteLater()
+                    self.task_manager.remove_task(sender)
+                    self.log_message(f"下载任务已完成并已移除：{url}", "SUCCESS")
             else:
-                self.log_message(f"下载任务失败: {url}")
+                self.log_message(f"下载任务失败：{url}")
                 worker = task_info['worker']
                 if hasattr(worker, 'failed_links_to_retry') and worker.failed_links_to_retry:
                     self.log_message(f"任务包含失败链接，已暂停等待重试")
@@ -857,7 +888,7 @@ class MainWindow(QMainWindow):
                         if left_progress:
                             left_progress.setText("下载失败")
                     task_info['status'] = TaskManager.STATUS_FAILED
-
+    
                 self.task_manager._try_start_pending_tasks()
 
     def update_task_progress(self, worker, progress_text: str):
@@ -1170,8 +1201,15 @@ class MainWindow(QMainWindow):
             return
 
         # 原有逻辑：处理暂停或失败的任务
+        # 恢复前，确保 worker 知道要重试失败链接
+        if force_retry:
+            if hasattr(worker, 'reload_failed_links_from_logger'):
+                worker.reload_failed_links_from_logger()
+            worker.retry_failed_links = True
+            self.log_message(f"已加载失败链接列表，准备重试")
+        
         self.task_manager.resume_task(worker, force_retry=force_retry)
-        self.log_message(f"已恢复任务 (ID: {task_id[:8]})")
+        self.log_message(f"已恢复任务，失败链接将转到队列末尾等待处理 (ID: {task_id[:8]})")
 
     def pause_task(self, worker: DownloadWorker):
         self.task_manager.pause_task(worker)

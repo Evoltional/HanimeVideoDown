@@ -67,7 +67,13 @@ class TaskLogger:
                 tasks[task_id]["updated_at"] = datetime.now().isoformat()
                 self._save_tasks(tasks)
 
-    def add_downloaded_video(self, task_id: str, video_filename: str) -> None:
+    def add_downloaded_video(self, task_id: str, video_filename: str, video_url: str = None) -> None:
+        """
+        添加已下载的视频记录，并可选择性地从视频链接列表中移除
+        :param task_id: 任务 ID
+        :param video_filename: 视频文件名
+        :param video_url: 可选的视频 URL，如果提供则从 video_links 中移除
+        """
         with self.lock:
             tasks = self._load_tasks()
             if task_id in tasks:
@@ -75,6 +81,13 @@ class TaskLogger:
                     tasks[task_id]["downloaded_videos"] = []
                 if video_filename not in tasks[task_id]["downloaded_videos"]:
                     tasks[task_id]["downloaded_videos"].append(video_filename)
+                    # 如果提供了 video_url，从 video_links 中移除
+                    if video_url and "video_links" in tasks[task_id]:
+                        video_links = tasks[task_id]["video_links"]
+                        if video_url in video_links:
+                            video_links.remove(video_url)
+                            tasks[task_id]["video_links"] = video_links
+                            self.log(LogLevel.INFO, f"已从任务 {task_id} 的视频链接列表中移除已下载的链接：{video_url}")
                     tasks[task_id]["updated_at"] = datetime.now().isoformat()
                     self._save_tasks(tasks)
 
@@ -124,11 +137,33 @@ class TaskLogger:
                 tasks[task_id]["updated_at"] = datetime.now().isoformat()
                 self._save_tasks(tasks)
 
-    def get_task_failed_links(self, task_id: str) -> List[str]:
+    def get_remaining_video_links(self, task_id: str) -> List[str]:
+        """
+        获取任务剩余未下载的视频链接（包括失败的链接）
+        :param task_id: 任务 ID
+        :return: 剩余的视频链接列表
+        """
         with self.lock:
             tasks = self._load_tasks()
             if task_id in tasks:
-                return tasks[task_id].get("failed_links", [])
+                video_links = tasks[task_id].get("video_links", [])
+                failed_links = tasks[task_id].get("failed_links", [])
+                # 返回剩余的 video_links 和 failed_links 的并集
+                remaining_links = list(set(video_links + failed_links))
+                return remaining_links
+            return []
+
+    def get_task_failed_links(self, task_id: str) -> List[str]:
+        """
+        获取任务的失败链接列表
+        :param task_id: 任务 ID
+        :return: 失败链接列表
+        """
+        with self.lock:
+            tasks = self._load_tasks()
+            if task_id in tasks:
+                failed_links = tasks[task_id].get("failed_links", [])
+                return failed_links
             return []
 
     def remove_task(self, task_id: str) -> bool:

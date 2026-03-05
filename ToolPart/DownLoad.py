@@ -223,7 +223,8 @@ class VideoDownloader:
                     return False
 
                 if task_logger and task_id:
-                    task_logger.add_downloaded_video(task_id, safe_filename)
+                    # 传递 video_url，以便从 video_links 中移除
+                    task_logger.add_downloaded_video(task_id, safe_filename, video_url=video_url)
 
                 return True
 
@@ -418,15 +419,18 @@ class HanimeScraper:
             success = self.downloader.download_video(video_url, safe_filename, worker,
                                                      self.task_logger, self.task_id)
             if success:
+                # 下载成功后，从 failed_links 和 video_links 中移除
                 if self.task_logger and self.task_id:
+                    # 从 failed_links 中移除（如果存在）
                     self.task_logger.remove_failed_link(self.task_id, original_url)
-                    self.task_logger.remove_video_link(self.task_id, original_url)
+                    # 注意：add_downloaded_video 已经会从 video_links 中移除
                 with self.lock:
                     if original_url in self.failed_links:
                         self.failed_links.remove(original_url)
                 return True
             else:
                 self.remove_progress(safe_filename)
+                # 下载失败，添加到 failed_links（会自动从 video_links 移到 failed_links）
                 if self.task_logger and self.task_id:
                     self.task_logger.add_failed_link(self.task_id, original_url, "download_failed")
                 with self.lock:
@@ -436,6 +440,7 @@ class HanimeScraper:
         except Exception as e:
             logger.exception(f"下载视频时发生异常")
             self.remove_progress(safe_filename)
+            # 异常失败，也添加到 failed_links
             if self.task_logger and self.task_id:
                 self.task_logger.add_failed_link(self.task_id, original_url, f"exception:{str(e)}")
             with self.lock:
@@ -677,60 +682,61 @@ class DownloadWorker(QThread):
         if self.should_pause():
             return False
 
+        # 优先使用剩余的链接（包括 video_links 和 failed_links）
+        remaining_links = []
         if self.is_restored and self.task_logger and self.task_id:
             all_tasks = self.task_logger.get_all_tasks()
             task_data = all_tasks.get(self.task_id, {})
             stored_video_links = task_data.get('video_links', [])
-            if stored_video_links:
-                self.log_signal.emit(f"恢复任务，使用已存储的 {len(stored_video_links)} 个视频链接")
-                video_links = stored_video_links
+            stored_failed_links = task_data.get('failed_links', [])
+            
+            # 合并剩余的视频链接和失败链接
+            if stored_video_links or stored_failed_links:
+                remaining_links = list(set(stored_video_links + stored_failed_links))
+                self.log_signal.emit(f"恢复任务，使用已存储的 {len(remaining_links)} 个剩余链接")
             else:
-                self.log_signal.emit("未找到已存储的视频链接，尝试重新抓取")
+                self.log_signal.emit("未找到已存储的剩余链接，尝试重新抓取")
                 video_links = await self.scraper.get_video_links(self.url, self)
+                remaining_links = video_links
         else:
+            # 新任务，需要抓取链接
             video_links = await self.scraper.get_video_links(self.url, self)
+            remaining_links = video_links
 
         if self.should_stop() or self.should_pause():
             return False
 
-        if not video_links:
+        if not remaining_links:
             self.log_signal.emit("没有找到任何视频链接")
             return False
 
-        if self.retry_failed_links and self.failed_links_to_retry:
-            self.log_signal.emit(f"开始重试 {len(self.failed_links_to_retry)} 个失败的链接...")
-            await self.scraper.process_links_batch(self.failed_links_to_retry, self)
-
-            remaining_failed = self.scraper.get_failed_links()
-            if remaining_failed:
-                self.log_signal.emit(f"仍有 {len(remaining_failed)} 个链接失败，任务将暂停")
-                if self.task_logger and self.task_id:
-                    self.task_logger.clear_failed_links(self.task_id)
-                    for link in remaining_failed:
-                        self.task_logger.add_failed_link(self.task_id, link, "retry_failed")
-                self.failed_links_to_retry = remaining_failed
-                return False
+        # 将剩余链接转换为 download 链接格式（不重新获取视频列表）
+        download_links_to_process = []
+        for link in remaining_links:
+            if '/watch?' in link:
+                download_link = link.replace('/watch?', '/download?')
             else:
-                self.log_signal.emit("所有链接重试成功！")
-                if self.task_logger and self.task_id:
-                    self.task_logger.clear_failed_links(self.task_id)
-                return True
+                download_link = link
+            download_links_to_process.append(download_link)
 
-        self.count_updated_signal.emit()
+        self.log_signal.emit(f"开始处理 {len(download_links_to_process)} 个剩余视频链接...")
+        
+        # 批量处理所有链接
+        await self.scraper.process_links_batch(download_links_to_process, self)
 
-        self.log_signal.emit(f"开始处理 {len(video_links)} 个视频链接...")
-        await self.scraper.process_links_batch(video_links, self)
-
+        # 处理完成后，检查是否有失败链接
         failed_links = self.scraper.get_failed_links()
         if failed_links:
             self.log_signal.emit(f"发现 {len(failed_links)} 个失败链接，任务将暂停以便重试")
             if self.task_logger and self.task_id:
+                # 将失败链接记录到 logger，失败链接会自动从 video_links 中移除
                 for link in failed_links:
                     self.task_logger.add_failed_link(self.task_id, link, "initial_failed")
             self.failed_links_to_retry = failed_links
+            # 任务暂停，等待用户手动继续
             return False
         else:
-            self.log_signal.emit(f"处理完成！共找到 {len(self.scraper.download_links)} 个下载链接")
+            self.log_signal.emit(f"处理完成！共下载 {len(self.scraper.download_links)} 个视频")
             return True
 
     def stop(self):
