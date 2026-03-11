@@ -35,7 +35,7 @@ class TaskLogger:
                 "downloaded_videos": [],
                 "failed_links": [],
                 "failure_type": "",
-                "total_video_count": 0,  # 新增字段，保存视频总数
+                "total_video_count": 0,
                 "created_at": datetime.now().isoformat(),
                 "updated_at": datetime.now().isoformat()
             }
@@ -63,13 +63,14 @@ class TaskLogger:
             tasks = self._load_tasks()
             if task_id in tasks:
                 tasks[task_id]["video_links"] = video_links
-                tasks[task_id]["total_video_count"] = len(video_links)  # 记录总数
+                tasks[task_id]["total_video_count"] = len(video_links)
                 tasks[task_id]["updated_at"] = datetime.now().isoformat()
                 self._save_tasks(tasks)
 
+    # ---------- 修改点：将移除链接的逻辑独立出来 ----------
     def add_downloaded_video(self, task_id: str, video_filename: str, video_url: str = None) -> None:
         """
-        添加已下载的视频记录，并可选择性地从视频链接列表中移除
+        添加已下载的视频记录，并从 video_links 中移除对应的链接（如果提供）
         :param task_id: 任务 ID
         :param video_filename: 视频文件名
         :param video_url: 可选的视频 URL，如果提供则从 video_links 中移除
@@ -77,19 +78,24 @@ class TaskLogger:
         with self.lock:
             tasks = self._load_tasks()
             if task_id in tasks:
+                # 确保 downloaded_videos 列表存在
                 if "downloaded_videos" not in tasks[task_id]:
                     tasks[task_id]["downloaded_videos"] = []
+
+                # 1. 无论文件名是否已存在，都尝试移除链接（关键修复）
+                if video_url and "video_links" in tasks[task_id]:
+                    video_links = tasks[task_id]["video_links"]
+                    if video_url in video_links:
+                        video_links.remove(video_url)
+                        tasks[task_id]["video_links"] = video_links
+                        self.log(LogLevel.INFO, f"已从任务 {task_id} 的视频链接列表中移除：{video_url}")
+
+                # 2. 如果文件名尚未记录，则添加到 downloaded_videos
                 if video_filename not in tasks[task_id]["downloaded_videos"]:
                     tasks[task_id]["downloaded_videos"].append(video_filename)
-                    # 如果提供了 video_url，从 video_links 中移除
-                    if video_url and "video_links" in tasks[task_id]:
-                        video_links = tasks[task_id]["video_links"]
-                        if video_url in video_links:
-                            video_links.remove(video_url)
-                            tasks[task_id]["video_links"] = video_links
-                            self.log(LogLevel.INFO, f"已从任务 {task_id} 的视频链接列表中移除已下载的链接：{video_url}")
-                    tasks[task_id]["updated_at"] = datetime.now().isoformat()
-                    self._save_tasks(tasks)
+
+                tasks[task_id]["updated_at"] = datetime.now().isoformat()
+                self._save_tasks(tasks)
 
     def add_failed_link(self, task_id: str, link: str, failure_type: str = "") -> None:
         with self.lock:
@@ -148,17 +154,11 @@ class TaskLogger:
             if task_id in tasks:
                 video_links = tasks[task_id].get("video_links", [])
                 failed_links = tasks[task_id].get("failed_links", [])
-                # 返回剩余的 video_links 和 failed_links 的并集
                 remaining_links = list(set(video_links + failed_links))
                 return remaining_links
             return []
 
     def get_task_failed_links(self, task_id: str) -> List[str]:
-        """
-        获取任务的失败链接列表
-        :param task_id: 任务 ID
-        :return: 失败链接列表
-        """
         with self.lock:
             tasks = self._load_tasks()
             if task_id in tasks:
