@@ -584,7 +584,7 @@ class MainWindow(QMainWindow):
 
         url_input_layout = QHBoxLayout()
         self.url_input = QLineEdit()
-        self.url_input.setPlaceholderText("例如: https://hanime1.me/watch?v=????")
+        self.url_input.setPlaceholderText("可输入多个链接，用空格、换行或逗号分隔")
         self.url_input.setMinimumHeight(50)
         url_input_layout.addWidget(self.url_input, 1)
 
@@ -756,8 +756,8 @@ class MainWindow(QMainWindow):
                 )
 
     def start_download(self) -> None:
-        url = self.url_input.text().strip()
-        if not url:
+        url_input = self.url_input.text().strip()
+        if not url_input:
             self.log_message("正在恢复所有暂停、失败和停止的任务...")
             # 获取所有未完成任务（状态不为 completed）
             all_tasks = self.task_logger.get_all_tasks()
@@ -783,8 +783,50 @@ class MainWindow(QMainWindow):
                 self.log_message(f"已恢复 {resumed_count} 个任务")
             return
 
+        # 清空输入框
         self.url_input.clear()
 
+        # 解析多个链接（支持空格、换行、逗号分隔）
+        urls = self._parse_multiple_urls(url_input)
+        
+        if not urls:
+            self.log_message("未检测到有效的视频链接", "ERROR")
+            return
+        
+        if len(urls) > 1:
+            self.log_message(f"检测到 {len(urls)} 个链接，将依次创建下载任务...")
+        
+        # 为每个链接创建任务
+        created_count = 0
+        for url in urls:
+            try:
+                self._create_single_task(url)
+                created_count += 1
+            except Exception as e:
+                self.log_message(f"创建任务失败 ({url[:50]}...): {str(e)}", "ERROR")
+        
+        if created_count > 0:
+            self.log_message(f"成功创建 {created_count} 个下载任务")
+
+    def _parse_multiple_urls(self, text: str) -> List[str]:
+        """解析文本中的多个URL，支持空格、换行、逗号分隔"""
+        import re
+        # 使用正则表达式提取所有 hanime1.me 的链接
+        pattern = r'https?://hanime1\.me/watch\?v=[^\s,;，；]+' 
+        urls = re.findall(pattern, text)
+        
+        # 去重并保持顺序
+        seen = set()
+        unique_urls = []
+        for url in urls:
+            if url not in seen:
+                seen.add(url)
+                unique_urls.append(url)
+        
+        return unique_urls
+
+    def _create_single_task(self, url: str) -> None:
+        """创建单个下载任务"""
         task_creation_step = self.start_step_log("main", "创建下载任务")
         try:
             opt_settings = self.performance_optimizer.optimize_browser_settings()
@@ -823,6 +865,7 @@ class MainWindow(QMainWindow):
         except Exception as e:
             self.fail_step_log(task_creation_step, str(e))
             self.log_message(f"创建下载任务失败: {str(e)}", "ERROR")
+            raise
 
     def on_download_finished(self, success: bool) -> None:
         sender = self.sender()
