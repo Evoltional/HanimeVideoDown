@@ -21,6 +21,7 @@ class TaskLogger:
     def __init__(self, log_dir: str = "Logger", config_file: str = "TaskLogger.json"):
         self.log_dir = log_dir
         self.config_file = os.path.join(log_dir, config_file)
+        self.exis_file = os.path.join(log_dir, "Exis.json")
         self.lock = threading.Lock()
         os.makedirs(self.log_dir, exist_ok=True)
 
@@ -262,3 +263,51 @@ class TaskLogger:
     def get_plain_log_message(self, level: LogLevel, message: str) -> str:
         timestamp = datetime.now().strftime("%H:%M:%S")
         return f"[{timestamp}] {level.value} - {message}"
+
+    def update_exis_file(self, storage_dir: str) -> List[str]:
+        """
+        扫描存储目录中的所有视频文件，并保存到Exis.json
+        :param storage_dir: 存储目录路径
+        :return: 找到的视频文件名列表
+        """
+        video_extensions = {'.mp4', '.avi', '.mkv', '.mov', '.wmv', '.flv', '.webm'}
+        video_files = []
+        
+        try:
+            # 递归遍历所有子文件夹
+            for root, dirs, files in os.walk(storage_dir):
+                for filename in files:
+                    _, ext = os.path.splitext(filename)
+                    if ext.lower() in video_extensions:
+                        video_files.append(filename)
+            
+            # 保存到Exis.json（覆盖原有内容）
+            with self.lock:
+                with open(self.exis_file, 'w', encoding='utf-8') as f:
+                    json.dump(video_files, f, indent=4, ensure_ascii=False)
+            
+            logger.info(f"已更新Exis.json，共找到 {len(video_files)} 个视频文件")
+            return video_files
+            
+        except Exception as e:
+            logger.error(f"更新Exis.json时出错: {e}")
+            return []
+
+    def is_video_exists(self, filename: str) -> bool:
+        """
+        检查视频文件是否已存在于Exis.json中
+        :param filename: 视频文件名
+        :return: 如果存在返回True，否则返回False
+        """
+        try:
+            with self.lock:
+                if not os.path.exists(self.exis_file):
+                    return False
+                
+                with open(self.exis_file, 'r', encoding='utf-8') as f:
+                    existing_videos = json.load(f)
+                
+                return filename in existing_videos
+        except Exception as e:
+            logger.error(f"检查视频是否存在时出错: {e}")
+            return False

@@ -149,8 +149,24 @@ class VideoDownloader:
         downloading_file_path = os.path.join(self.download_dir, downloading_filename)
         final_file_path = os.path.join(self.download_dir, safe_filename)
 
+        # 检查文件是否已在存储目录中存在（通过Exis.json）
+        if task_logger and task_logger.is_video_exists(safe_filename):
+            logger.info(f"文件已存在于存储目录中（Exis.json记录），跳过下载: {safe_filename}")
+            # 发送日志到UI
+            if worker and hasattr(worker, 'log_signal'):
+                worker.log_signal.emit(f"✓ 文件已存在（Exis.json记录），跳过下载: {safe_filename}")
+            if task_logger and task_id:
+                task_logger.add_downloaded_video(task_id, safe_filename,
+                                                 video_url=watch_url if watch_url else video_url)
+                if self.progress_callback:
+                    self.progress_callback(safe_filename, "已完成")
+            return True
+
         if os.path.exists(final_file_path):
             logger.info(f"文件已存在，跳过下载: {final_file_path}")
+            # 发送日志到UI
+            if worker and hasattr(worker, 'log_signal'):
+                worker.log_signal.emit(f"✓ 文件已存在，跳过下载: {safe_filename}")
             if task_logger and task_id:
                 task_logger.add_downloaded_video(task_id, safe_filename,
                                                  video_url=watch_url if watch_url else video_url)
@@ -168,6 +184,9 @@ class VideoDownloader:
                 return False
 
         logger.info(f"开始下载: {safe_filename} (临时文件: {downloading_filename})")
+        # 发送日志到UI
+        if worker and hasattr(worker, 'log_signal'):
+            worker.log_signal.emit(f"▶ 开始下载: {safe_filename}")
 
         if self.progress_callback:
             self.progress_callback(safe_filename, "0%")
@@ -253,10 +272,15 @@ class VideoDownloader:
                 try:
                     os.replace(downloading_file_path, final_file_path)
                     logger.info(f"文件重命名完成: {final_file_path}")
+                    # 发送日志到UI
+                    if worker and hasattr(worker, 'log_signal'):
+                        worker.log_signal.emit(f"✓ 下载完成: {safe_filename}")
                     if self.progress_callback:
                         self.progress_callback(safe_filename, "100.0%")
                 except Exception as e:
                     logger.error(f"文件重命名失败: {e}")
+                    if worker and hasattr(worker, 'log_signal'):
+                        worker.log_signal.emit(f"✗ 文件重命名失败: {safe_filename} - {str(e)}")
                     return False
 
                 if task_logger and task_id:
@@ -272,10 +296,16 @@ class VideoDownloader:
                 if network_retry_count <= MAX_NETWORK_RETRIES:
                     wait_time = NETWORK_RETRY_DELAY
                     logger.warning(f"网络连接波动 ({network_retry_count}/{MAX_NETWORK_RETRIES})，等待{wait_time}秒后重试: {e}")
+                    # 发送日志到UI
+                    if worker and hasattr(worker, 'log_signal'):
+                        worker.log_signal.emit(f"⚠ 网络波动 ({network_retry_count}/{MAX_NETWORK_RETRIES})，{wait_time}秒后重试: {safe_filename}")
                     time.sleep(wait_time)
                     continue
                 else:
                     logger.error(f"连续{MAX_NETWORK_RETRIES}次网络波动，尝试整体重试")
+                    # 发送日志到UI
+                    if worker and hasattr(worker, 'log_signal'):
+                        worker.log_signal.emit(f"✗ 网络波动严重，准备重试: {safe_filename}")
                     # 清理临时文件，进入下一轮整体重试
                     if os.path.exists(downloading_file_path):
                         try:
@@ -288,10 +318,14 @@ class VideoDownloader:
                     if overall_retry_count < max_overall_retries:
                         wait_time = min(2 ** overall_retry_count, 30)
                         logger.info(f"整体重试 {overall_retry_count}/{max_overall_retries}，等待{wait_time}秒")
+                        if worker and hasattr(worker, 'log_signal'):
+                            worker.log_signal.emit(f"↻ 整体重试 {overall_retry_count}/{max_overall_retries}: {safe_filename}")
                         time.sleep(wait_time)
                         continue
                     else:
                         logger.error("下载最终失败：超过最大重试次数")
+                        if worker and hasattr(worker, 'log_signal'):
+                            worker.log_signal.emit(f"✗ 下载失败（超过重试次数）: {safe_filename}")
                         return False
                         
             except requests.exceptions.Timeout as e:

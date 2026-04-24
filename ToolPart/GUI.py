@@ -479,6 +479,8 @@ class MainWindow(QMainWindow):
         print("8. 设置样式表完成")
         self.download_dir = self.config_manager.get("download_dir", os.path.join(os.getcwd(), "Download"))
         print(f"9. 设置下载目录为: {self.download_dir}")
+        self.storage_dir = self.config_manager.get("storage_dir", self.download_dir)
+        print(f"9.5. 设置存储目录为: {self.storage_dir}")
         self.headless_mode = self.config_manager.get("headless_mode", True)
         print(f"10. 设置无头模式为: {self.headless_mode}")
         self.bypass_mode = self.config_manager.get("bypass_mode", False)  # 读取Bypass设置
@@ -487,6 +489,12 @@ class MainWindow(QMainWindow):
         print("12. 初始化任务管理器完成")
         self.init_ui()
         print("13. 初始化UI完成")
+        
+        # 初始化时扫描存储目录并更新Exis.json
+        self.log_message("正在初始化，扫描存储目录中的视频文件...")
+        video_files = self.task_logger.update_exis_file(self.storage_dir)
+        self.log_message(f"初始化完成，已记录 {len(video_files)} 个现有视频文件")
+        
         self.restore_incomplete_tasks()
 
     def update_task_count(self, worker: DownloadWorker):
@@ -560,22 +568,39 @@ class MainWindow(QMainWindow):
 
         path_group = QGroupBox("下载路径设置")
         path_layout = QVBoxLayout(path_group)
-        path_group.setMaximumHeight(80)
+        path_group.setMaximumHeight(140)
 
-        path_control_layout = QHBoxLayout()
+        # 下载路径行
+        download_path_layout = QHBoxLayout()
         self.download_path_label = QLabel(f"当前下载路径: {self.download_dir}")
         self.download_path_label.setStyleSheet("color: #ecf0f1;")
-        path_control_layout.addWidget(self.download_path_label)
+        download_path_layout.addWidget(self.download_path_label)
 
         change_path_btn = QPushButton("更改路径")
         change_path_btn.clicked.connect(self.change_download_path)
-        path_control_layout.addWidget(change_path_btn)
+        download_path_layout.addWidget(change_path_btn)
 
         open_dir_btn = QPushButton("打开目录")
         open_dir_btn.clicked.connect(self.open_download_directory)
-        path_control_layout.addWidget(open_dir_btn)
+        download_path_layout.addWidget(open_dir_btn)
 
-        path_layout.addLayout(path_control_layout)
+        path_layout.addLayout(download_path_layout)
+
+        # 存储路径行
+        storage_path_layout = QHBoxLayout()
+        self.storage_path_label = QLabel(f"当前存储目录: {self.storage_dir}")
+        self.storage_path_label.setStyleSheet("color: #ecf0f1;")
+        storage_path_layout.addWidget(self.storage_path_label)
+
+        change_storage_btn = QPushButton("选择存储目录")
+        change_storage_btn.clicked.connect(self.change_storage_path)
+        storage_path_layout.addWidget(change_storage_btn)
+
+        open_storage_btn = QPushButton("打开存储目录")
+        open_storage_btn.clicked.connect(self.open_storage_directory)
+        storage_path_layout.addWidget(open_storage_btn)
+
+        path_layout.addLayout(storage_path_layout)
         main_layout.addWidget(path_group)
 
         input_group = QGroupBox("输入视频列表链接")
@@ -1447,6 +1472,52 @@ class MainWindow(QMainWindow):
             self.log_message(f"打开目录失败: {str(e)}", "ERROR")
             if 'open_step' in locals():
                 self.fail_step_log(open_step, str(e))
+
+    def change_storage_path(self) -> None:
+        """选择存储目录并更新Exis.json"""
+        new_path = QFileDialog.getExistingDirectory(
+            self,
+            "选择存储目录",
+            self.storage_dir,
+            QFileDialog.ShowDirsOnly | QFileDialog.DontResolveSymlinks
+        )
+
+        if new_path:
+            self.storage_dir = new_path
+            self.storage_path_label.setText(f"当前存储目录: {self.storage_dir}")
+            self.log_message(f"存储目录已更新为: {self.storage_dir}")
+            self.config_manager.set("storage_dir", self.storage_dir)
+            
+            # 更新Exis.json
+            self.log_message("正在扫描存储目录中的视频文件...")
+            video_files = self.task_logger.update_exis_file(self.storage_dir)
+            self.log_message(f"扫描完成，共找到 {len(video_files)} 个视频文件")
+
+    def open_storage_directory(self) -> None:
+        """打开存储目录"""
+        try:
+            import platform
+            import os
+
+            current_storage_dir = self.storage_dir
+            if not os.path.exists(current_storage_dir):
+                os.makedirs(current_storage_dir, exist_ok=True)
+                self.log_message(f"创建存储目录: {current_storage_dir}")
+
+            system = platform.system()
+            if system == "Windows":
+                os.startfile(current_storage_dir)
+            elif system == "Darwin":  # macOS
+                import subprocess
+                subprocess.Popen(["open", current_storage_dir])
+            else:  # Linux
+                import subprocess
+                subprocess.Popen(["xdg-open", current_storage_dir])
+
+            self.log_message(f"已打开存储目录: {current_storage_dir}")
+
+        except Exception as e:
+            self.log_message(f"打开存储目录失败: {str(e)}", "ERROR")
 
     def _check_latest_headless_setting(self) -> None:
         try:
