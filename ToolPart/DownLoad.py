@@ -132,7 +132,7 @@ class VideoDownloader:
     def download_video(self, video_url: str, filename: str, worker=None, task_logger=None, task_id=None,
                        watch_url=None) -> bool:
         """
-        下载视频文件
+        下载视频文件（增强网络波动抗性）
         :param video_url: 视频直链
         :param filename: 文件名
         :param worker: 工作线程
@@ -172,10 +172,18 @@ class VideoDownloader:
         if self.progress_callback:
             self.progress_callback(safe_filename, "0%")
 
-        retry_count = 0
+        # 外层循环：整体重试次数（应对完全失败的情况）
+        max_overall_retries = self.max_retries
+        overall_retry_count = 0
         CHECK_INTERVAL = 0.5  # 每0.5秒检查一次暂停/停止
-
-        while retry_count < self.max_retries:
+        
+        # 内层配置：网络波动容忍度
+        NETWORK_RETRY_DELAY = 3  # 网络波动时等待3秒
+        MAX_NETWORK_RETRIES = 5  # 最多连续5次网络波动重试后才认为真正失败
+        
+        while overall_retry_count < max_overall_retries:
+            network_retry_count = 0  # 每次整体重试时重置网络重试计数
+            
             try:
                 response = self.session.get(video_url, stream=True, timeout=30)
                 response.raise_for_status()
@@ -183,14 +191,31 @@ class VideoDownloader:
                 total_size = int(response.headers.get('content-length', 0))
                 downloaded_size = 0
                 last_check_time = time.time()
+                consecutive_network_errors = 0  # 连续网络错误计数器
 
                 os.makedirs(self.download_dir, exist_ok=True)
 
                 with open(downloading_file_path, 'wb') as f:
                     for chunk in response.iter_content(chunk_size=8192):
                         if chunk:
-                            f.write(chunk)
-                            downloaded_size += len(chunk)
+                            try:
+                                f.write(chunk)
+                                downloaded_size += len(chunk)
+                                consecutive_network_errors = 0  # 成功写入，重置计数器
+                            except IOError as write_error:
+                                # 磁盘写入错误，可能是网络导致的IO问题
+                                consecutive_network_errors += 1
+                                logger.warning(f"写入数据块时出错 ({consecutive_network_errors}/{MAX_NETWORK_RETRIES}): {write_error}")
+                                
+                                if consecutive_network_errors >= MAX_NETWORK_RETRIES:
+                                    logger.error(f"连续{MAX_NETWORK_RETRIES}次写入失败，判定为严重错误")
+                                    response.close()
+                                    raise
+                                
+                                # 等待3秒后重试当前块
+                                logger.info(f"等待{NETWORK_RETRY_DELAY}秒后重试...")
+                                time.sleep(NETWORK_RETRY_DELAY)
+                                continue
 
                             # 基于时间检查暂停/停止
                             now = time.time()
@@ -241,15 +266,107 @@ class VideoDownloader:
 
                 return True
 
-            except Exception as e:
-                retry_count += 1
-                wait_time = min(2 ** retry_count, 30)  # 指数退避
-                logger.warning(f"下载失败 (重试 {retry_count}/{self.max_retries})，等待 {wait_time} 秒: {e}")
-                if retry_count >= self.max_retries:
-                    logger.error("下载最终失败")
-                    return False
-                else:
+            except requests.exceptions.ConnectionError as e:
+                # 连接错误：典型的网络波动，等待3秒后重试当前整体请求
+                network_retry_count += 1
+                if network_retry_count <= MAX_NETWORK_RETRIES:
+                    wait_time = NETWORK_RETRY_DELAY
+                    logger.warning(f"网络连接波动 ({network_retry_count}/{MAX_NETWORK_RETRIES})，等待{wait_time}秒后重试: {e}")
                     time.sleep(wait_time)
+                    continue
+                else:
+                    logger.error(f"连续{MAX_NETWORK_RETRIES}次网络波动，尝试整体重试")
+                    # 清理临时文件，进入下一轮整体重试
+                    if os.path.exists(downloading_file_path):
+                        try:
+                            os.remove(downloading_file_path)
+                            logger.info("已清理临时文件准备重试")
+                        except Exception as cleanup_err:
+                            logger.error(f"清理临时文件失败: {cleanup_err}")
+                    
+                    overall_retry_count += 1
+                    if overall_retry_count < max_overall_retries:
+                        wait_time = min(2 ** overall_retry_count, 30)
+                        logger.info(f"整体重试 {overall_retry_count}/{max_overall_retries}，等待{wait_time}秒")
+                        time.sleep(wait_time)
+                        continue
+                    else:
+                        logger.error("下载最终失败：超过最大重试次数")
+                        return False
+                        
+            except requests.exceptions.Timeout as e:
+                # 超时错误：也视为网络波动，等待3秒后重试当前整体请求
+                network_retry_count += 1
+                if network_retry_count <= MAX_NETWORK_RETRIES:
+                    wait_time = NETWORK_RETRY_DELAY
+                    logger.warning(f"请求超时 ({network_retry_count}/{MAX_NETWORK_RETRIES})，等待{wait_time}秒后重试: {e}")
+                    time.sleep(wait_time)
+                    continue
+                else:
+                    logger.error(f"连续{MAX_NETWORK_RETRIES}次超时，尝试整体重试")
+                    if os.path.exists(downloading_file_path):
+                        try:
+                            os.remove(downloading_file_path)
+                            logger.info("已清理临时文件准备重试")
+                        except Exception as cleanup_err:
+                            logger.error(f"清理临时文件失败: {cleanup_err}")
+                    
+                    overall_retry_count += 1
+                    if overall_retry_count < max_overall_retries:
+                        wait_time = min(2 ** overall_retry_count, 30)
+                        logger.info(f"整体重试 {overall_retry_count}/{max_overall_retries}，等待{wait_time}秒")
+                        time.sleep(wait_time)
+                        continue
+                    else:
+                        logger.error("下载最终失败：超过最大重试次数")
+                        return False
+                        
+            except requests.exceptions.RequestException as e:
+                # 其他请求异常：先尝试网络波动重试，再整体重试
+                network_retry_count += 1
+                if network_retry_count <= MAX_NETWORK_RETRIES:
+                    wait_time = NETWORK_RETRY_DELAY
+                    logger.warning(f"请求异常 ({network_retry_count}/{MAX_NETWORK_RETRIES})，等待{wait_time}秒后重试: {e}")
+                    time.sleep(wait_time)
+                    continue
+                else:
+                    logger.error(f"连续{MAX_NETWORK_RETRIES}次请求异常，尝试整体重试")
+                    if os.path.exists(downloading_file_path):
+                        try:
+                            os.remove(downloading_file_path)
+                            logger.info("已清理临时文件准备重试")
+                        except Exception as cleanup_err:
+                            logger.error(f"清理临时文件失败: {cleanup_err}")
+                    
+                    overall_retry_count += 1
+                    if overall_retry_count < max_overall_retries:
+                        wait_time = min(2 ** overall_retry_count, 30)
+                        logger.info(f"整体重试 {overall_retry_count}/{max_overall_retries}，等待{wait_time}秒")
+                        time.sleep(wait_time)
+                        continue
+                    else:
+                        logger.error("下载最终失败：超过最大重试次数")
+                        return False
+                        
+            except Exception as e:
+                # 未知异常：直接计入整体重试，不浪费在网络重试上
+                logger.exception(f"下载过程中发生未知异常")
+                if os.path.exists(downloading_file_path):
+                    try:
+                        os.remove(downloading_file_path)
+                        logger.info("已清理临时文件")
+                    except Exception as cleanup_err:
+                        logger.error(f"清理临时文件失败: {cleanup_err}")
+                
+                overall_retry_count += 1
+                if overall_retry_count < max_overall_retries:
+                    wait_time = min(2 ** overall_retry_count, 30)
+                    logger.warning(f"整体重试 {overall_retry_count}/{max_overall_retries}，等待{wait_time}秒: {e}")
+                    time.sleep(wait_time)
+                    continue
+                else:
+                    logger.error("下载最终失败：超过最大重试次数")
+                    return False
 
         return False
 
