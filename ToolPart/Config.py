@@ -14,7 +14,8 @@ class ConfigManager:
         self._lock = threading.Lock()
         self.default_config = {
             "download_dir": os.path.join(os.getcwd(), "Download"),
-            "storage_dir": os.path.join(os.getcwd(), "Download"),
+            "storage_dir": os.path.join(os.getcwd(), "Download"),  # 保留用于兼容
+            "storage_dirs": [os.path.join(os.getcwd(), "Download")],  # 新增：支持多个存储目录
             "headless_mode": True,
             "bypass_mode": False,  # 新增：是否启用Bypass
             "window_position": [100, 100],

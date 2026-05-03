@@ -266,7 +266,7 @@ class TaskLogger:
 
     def update_exis_file(self, storage_dir: str) -> List[str]:
         """
-        扫描存储目录中的所有视频文件，并保存到Exis.json
+        扫描存储目录中的所有视频文件，并添加到Exis.json（追加模式）
         :param storage_dir: 存储目录路径
         :return: 找到的视频文件名列表
         """
@@ -281,17 +281,39 @@ class TaskLogger:
                     if ext.lower() in video_extensions:
                         video_files.append(filename)
             
-            # 保存到Exis.json（覆盖原有内容）
-            with self.lock:
-                with open(self.exis_file, 'w', encoding='utf-8') as f:
-                    json.dump(video_files, f, indent=4, ensure_ascii=False)
-            
-            logger.info(f"已更新Exis.json，共找到 {len(video_files)} 个视频文件")
             return video_files
             
         except Exception as e:
-            logger.error(f"更新Exis.json时出错: {e}")
+            logger.error(f"扫描目录时出错: {e}")
             return []
+
+    def batch_update_exis_file(self, storage_dirs: List[str]) -> int:
+        """
+        批量扫描多个存储目录，更新Exis.json
+        :param storage_dirs: 存储目录列表
+        :return: 总共找到的视频文件数量
+        """
+        all_video_files = []
+        
+        # 扫描所有目录
+        for storage_dir in storage_dirs:
+            video_files = self.update_exis_file(storage_dir)
+            all_video_files.extend(video_files)
+        
+        # 去重
+        unique_files = list(set(all_video_files))
+        
+        # 保存到Exis.json（覆盖原有内容）
+        try:
+            with self.lock:
+                with open(self.exis_file, 'w', encoding='utf-8') as f:
+                    json.dump(unique_files, f, indent=4, ensure_ascii=False)
+            
+            logger.info(f"已更新Exis.json，共找到 {len(unique_files)} 个唯一视频文件")
+            return len(unique_files)
+        except Exception as e:
+            logger.error(f"保存Exis.json时出错: {e}")
+            return 0
 
     def is_video_exists(self, filename: str) -> bool:
         """

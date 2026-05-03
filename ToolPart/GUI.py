@@ -479,8 +479,12 @@ class MainWindow(QMainWindow):
         print("8. 设置样式表完成")
         self.download_dir = self.config_manager.get("download_dir", os.path.join(os.getcwd(), "Download"))
         print(f"9. 设置下载目录为: {self.download_dir}")
-        self.storage_dir = self.config_manager.get("storage_dir", self.download_dir)
-        print(f"9.5. 设置存储目录为: {self.storage_dir}")
+        # 支持多个存储目录
+        self.storage_dirs = self.config_manager.get("storage_dirs", [os.path.join(os.getcwd(), "Download")])
+        if not isinstance(self.storage_dirs, list):
+            self.storage_dirs = [self.storage_dirs]
+        self.storage_dir = self.storage_dirs[0] if self.storage_dirs else os.path.join(os.getcwd(), "Download")
+        print(f"9.5. 设置存储目录为: {self.storage_dirs}")
         self.headless_mode = self.config_manager.get("headless_mode", True)
         print(f"10. 设置无头模式为: {self.headless_mode}")
         self.bypass_mode = self.config_manager.get("bypass_mode", False)  # 读取Bypass设置
@@ -490,10 +494,12 @@ class MainWindow(QMainWindow):
         self.init_ui()
         print("13. 初始化UI完成")
         
-        # 初始化时扫描存储目录并更新Exis.json
-        self.log_message("正在初始化，扫描存储目录中的视频文件...")
-        video_files = self.task_logger.update_exis_file(self.storage_dir)
-        self.log_message(f"初始化完成，已记录 {len(video_files)} 个现有视频文件")
+        # 初始化时扫描所有存储目录并更新Exis.json
+        self.log_message("正在初始化，扫描所有存储目录中的视频文件...")
+        total_count = self.task_logger.batch_update_exis_file(self.storage_dirs)
+        for storage_dir in self.storage_dirs:
+            self.log_message(f"已扫描目录: {storage_dir}")
+        self.log_message(f"初始化完成，共记录 {total_count} 个唯一视频文件")
         
         self.restore_incomplete_tasks()
 
@@ -588,7 +594,8 @@ class MainWindow(QMainWindow):
 
         # 存储路径行
         storage_path_layout = QHBoxLayout()
-        self.storage_path_label = QLabel(f"当前存储目录: {self.storage_dir}")
+        storage_dirs_display = "; ".join(self.storage_dirs) if len(self.storage_dirs) <= 2 else "; ".join(self.storage_dirs[:2]) + f"...等{len(self.storage_dirs)}个目录"
+        self.storage_path_label = QLabel(f"当前存储目录: {storage_dirs_display}")
         self.storage_path_label.setStyleSheet("color: #ecf0f1;")
         storage_path_layout.addWidget(self.storage_path_label)
 
@@ -1474,32 +1481,113 @@ class MainWindow(QMainWindow):
                 self.fail_step_log(open_step, str(e))
 
     def change_storage_path(self) -> None:
-        """选择存储目录并更新Exis.json"""
-        new_path = QFileDialog.getExistingDirectory(
-            self,
-            "选择存储目录",
-            self.storage_dir,
-            QFileDialog.ShowDirsOnly | QFileDialog.DontResolveSymlinks
-        )
+        """选择存储目录数量并依次选择文件夹"""
+        from PyQt5.QtWidgets import QDialog, QPushButton, QHBoxLayout
+        
+        # 创建选择数量的对话框
+        dialog = QDialog(self)
+        dialog.setWindowTitle("选择存储目录数量")
+        dialog.setFixedSize(400, 100)
+        # 隐藏窗口标题栏的帮助按钮
+        dialog.setWindowFlags(dialog.windowFlags() & ~Qt.WindowContextHelpButtonHint)
+        dialog.setStyleSheet("""
+            QDialog {
+                background-color: #2c3e50;
+            }
+            QPushButton {
+                background-color: #3498db;
+                color: white;
+                border: none;
+                border-radius: 5px;
+                padding: 10px 20px;
+                font-weight: bold;
+                font-size: 16px;
+                min-width: 80px;
+            }
+            QPushButton:hover {
+                background-color: #2980b9;
+            }
+        """)
+        
+        layout = QHBoxLayout(dialog)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(10)
+        
+        def select_count(count):
+            dialog.accept()
+            self._select_storage_directories(count)
+        
+        btn_1 = QPushButton("1个")
+        btn_1.clicked.connect(lambda: select_count(1))
+        layout.addWidget(btn_1)
+        
+        btn_2 = QPushButton("2个")
+        btn_2.clicked.connect(lambda: select_count(2))
+        layout.addWidget(btn_2)
+        
+        btn_3 = QPushButton("3个")
+        btn_3.clicked.connect(lambda: select_count(3))
+        layout.addWidget(btn_3)
+        
+        dialog.exec_()
 
-        if new_path:
-            self.storage_dir = new_path
-            self.storage_path_label.setText(f"当前存储目录: {self.storage_dir}")
-            self.log_message(f"存储目录已更新为: {self.storage_dir}")
-            self.config_manager.set("storage_dir", self.storage_dir)
+    def _select_storage_directories(self, count: int) -> None:
+        """依次选择指定数量的存储目录"""
+        selected_dirs = []
+        
+        for i in range(count):
+            title = f"选择第 {i+1} 个存储目录"
+            default_dir = self.storage_dirs[i] if i < len(self.storage_dirs) else os.getcwd()
+            new_path = QFileDialog.getExistingDirectory(
+                self,
+                title,
+                default_dir,
+                QFileDialog.ShowDirsOnly | QFileDialog.DontResolveSymlinks
+            )
             
-            # 更新Exis.json
-            self.log_message("正在扫描存储目录中的视频文件...")
-            video_files = self.task_logger.update_exis_file(self.storage_dir)
-            self.log_message(f"扫描完成，共找到 {len(video_files)} 个视频文件")
+            if new_path:
+                selected_dirs.append(new_path)
+            else:
+                # 用户取消了选择
+                if selected_dirs:
+                    self.log_message(f"已取消选择，仅保存前 {len(selected_dirs)} 个目录")
+                else:
+                    self.log_message("已取消选择存储目录")
+                return
+        
+        # 更新存储目录列表
+        self.storage_dirs = selected_dirs
+        self.storage_dir = self.storage_dirs[0]  # 保持第一个为主目录
+        
+        # 更新显示
+        storage_dirs_display = "; ".join(self.storage_dirs) if len(self.storage_dirs) <= 2 else "; ".join(self.storage_dirs[:2]) + f"...等{len(self.storage_dirs)}个目录"
+        self.storage_path_label.setText(f"当前存储目录: {storage_dirs_display}")
+        
+        # 保存到配置
+        self.config_manager.set("storage_dirs", self.storage_dirs)
+        
+        self.log_message(f"存储目录已更新为 {len(self.storage_dirs)} 个目录:")
+        for idx, dir_path in enumerate(self.storage_dirs, 1):
+            self.log_message(f"  {idx}. {dir_path}")
+        
+        # 更新Exis.json - 扫描所有存储目录
+        self.log_message("正在扫描所有存储目录中的视频文件...")
+        total_count = self.task_logger.batch_update_exis_file(self.storage_dirs)
+        for storage_dir in self.storage_dirs:
+            self.log_message(f"已扫描目录: {storage_dir}")
+        self.log_message(f"扫描完成，共找到 {total_count} 个唯一视频文件")
 
     def open_storage_directory(self) -> None:
-        """打开存储目录"""
+        """打开存储目录（打开第一个目录）"""
         try:
             import platform
             import os
 
-            current_storage_dir = self.storage_dir
+            if not self.storage_dirs:
+                self.log_message("没有设置存储目录", "ERROR")
+                return
+            
+            current_storage_dir = self.storage_dirs[0]
             if not os.path.exists(current_storage_dir):
                 os.makedirs(current_storage_dir, exist_ok=True)
                 self.log_message(f"创建存储目录: {current_storage_dir}")
