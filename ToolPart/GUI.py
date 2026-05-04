@@ -382,6 +382,10 @@ class MainWindow(QMainWindow):
         self.step_trackers: Dict[str, List[StepTracker]] = {}
         print("4. 步骤追踪器初始化完成")
         self.performance_optimizer = PerformanceOptimizer()
+        
+        # 初始化任务完成计数器（每次启动程序清零）
+        self.completed_task_count = 0
+        print("4.5. 初始化任务完成计数器")
 
         window_pos = self.config_manager.get("window_position", [100, 100])
         window_size = self.config_manager.get("window_size", [1000, 800])
@@ -938,7 +942,11 @@ class MainWindow(QMainWindow):
                     self.tasks_layout.removeWidget(task_info['task_frame'])
                     task_info['task_frame'].deleteLater()
                     self.task_manager.remove_task(sender)
+                    
+                    # 增加完成任务计数
+                    self.completed_task_count += 1
                     self.log_message(f"下载任务已完成并已移除：{url}", "SUCCESS")
+                    self.log_message(f"已完成任务数：{self.completed_task_count}", "SUCCESS")
             else:
                 self.log_message(f"下载任务失败：{url}")
                 worker = task_info['worker']

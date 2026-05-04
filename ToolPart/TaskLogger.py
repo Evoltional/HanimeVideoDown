@@ -76,6 +76,7 @@ class TaskLogger:
         :param video_filename: 视频文件名
         :param video_url: 可选的视频 URL，如果提供则从 video_links 中移除
         """
+        import re
         with self.lock:
             tasks = self._load_tasks()
             if task_id in tasks:
@@ -91,9 +92,12 @@ class TaskLogger:
                         tasks[task_id]["video_links"] = video_links
                         self.log(LogLevel.INFO, f"已从任务 {task_id} 的视频链接列表中移除：{video_url}")
 
-                # 2. 如果文件名尚未记录，则添加到 downloaded_videos
-                if video_filename not in tasks[task_id]["downloaded_videos"]:
-                    tasks[task_id]["downloaded_videos"].append(video_filename)
+                # 2. 删除 [中字後補] 及其前后空格后保存
+                cleaned_filename = re.sub(r'\s*\[中字後補\]\s*', '', video_filename)
+                
+                # 3. 如果文件名尚未记录，则添加到 downloaded_videos
+                if cleaned_filename not in tasks[task_id]["downloaded_videos"]:
+                    tasks[task_id]["downloaded_videos"].append(cleaned_filename)
 
                 tasks[task_id]["updated_at"] = datetime.now().isoformat()
                 self._save_tasks(tasks)
@@ -270,6 +274,7 @@ class TaskLogger:
         :param storage_dir: 存储目录路径
         :return: 找到的视频文件名列表
         """
+        import re
         video_extensions = {'.mp4', '.avi', '.mkv', '.mov', '.wmv', '.flv', '.webm'}
         video_files = []
         
@@ -279,7 +284,9 @@ class TaskLogger:
                 for filename in files:
                     _, ext = os.path.splitext(filename)
                     if ext.lower() in video_extensions:
-                        video_files.append(filename)
+                        # 删除 [中字後補] 及其前后空格后保存
+                        cleaned_filename = re.sub(r'\s*\[中字後補\]\s*', '', filename)
+                        video_files.append(cleaned_filename)
             
             return video_files
             
@@ -329,7 +336,12 @@ class TaskLogger:
                 with open(self.exis_file, 'r', encoding='utf-8') as f:
                     existing_videos = json.load(f)
                 
-                return filename in existing_videos
+                # 删除 [中字後補] 及其前后空格后再对比
+                import re
+                cleaned_filename = re.sub(r'\s*\[中字後補\]\s*', '', filename)
+                
+                # 同时检查原始文件名和清理后的文件名
+                return filename in existing_videos or cleaned_filename in existing_videos
         except Exception as e:
             logger.error(f"检查视频是否存在时出错: {e}")
             return False

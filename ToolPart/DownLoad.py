@@ -40,6 +40,10 @@ class VideoDownloader:
         for char in invalid_chars:
             filename = filename.replace(char, '_')
         filename = unquote(filename)
+        
+        # 删除 [中字後補] 及其前后空格
+        filename = re.sub(r'\s*\[中字後補\]\s*', '', filename)
+        
         if len(filename) > 200:
             name, ext = os.path.splitext(filename)
             filename = name[:190] + ext
@@ -890,7 +894,15 @@ class DownloadWorker(QThread):
             self.failed_links_to_retry = failed_links
             return False
         else:
-            self.log_signal.emit(f"处理完成！共下载 {len(self.scraper.download_links)} 个视频")
+            # 从 TaskLogger 获取实际下载的视频数量
+            downloaded_count = 0
+            if self.task_logger and self.task_id:
+                all_tasks = self.task_logger.get_all_tasks()
+                task_data = all_tasks.get(self.task_id, {})
+                downloaded_videos = task_data.get('downloaded_videos', [])
+                downloaded_count = len(downloaded_videos)
+            
+            self.log_signal.emit(f"处理完成！共下载 {downloaded_count} 个视频")
             return True
 
     def stop(self):
