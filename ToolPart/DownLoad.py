@@ -36,9 +36,9 @@ class VideoDownloader:
 
     @staticmethod
     def _sanitize_filename(filename: str) -> str:
-        invalid_chars = '<>:"/\\|?*'
+        invalid_chars = '<>:"/\\|?_*'
         for char in invalid_chars:
-            filename = filename.replace(char, '_')
+            filename = filename.replace(char, ' ')
         filename = unquote(filename)
         
         # 删除 [中字後補] 及其前后空格
