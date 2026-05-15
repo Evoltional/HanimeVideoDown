@@ -519,23 +519,57 @@ class MainWindow(QMainWindow):
             self._update_progress_count_display(task_info, progress_count_label)
 
     def restore_incomplete_tasks(self):
+        """
+        恢复未完成的任务
+        重要：所有任务启动时都设置为暂停状态，避免程序意外退出导致状态混乱
+        用户需要手动点击“开始下载”或“继续”按钮来启动任务
+        """
         incomplete_tasks = self.task_logger.get_incomplete_tasks()
         if incomplete_tasks:
-            self.log_message(f"找到 {len(incomplete_tasks)} 个未完成的任务，正在恢复...")
+            self.log_message(f"📋 找到 {len(incomplete_tasks)} 个未完成的任务")
+            
+            # 统计各状态的任务数量
+            status_count = {}
+            for task_id, task_info in incomplete_tasks.items():
+                status = task_info.get("status", "unknown")
+                status_count[status] = status_count.get(status, 0) + 1
+            
+            # 输出状态分布
+            status_summary = []
+            for status, count in sorted(status_count.items()):
+                status_summary.append(f"{status}: {count}个")
+            self.log_message(f"📊 任务状态：{'，'.join(status_summary)}")
+            
+            # 将所有任务的状态统一改为 paused，避免状态混乱
+            self.log_message("⚠️  为避免状态混乱，所有任务将设置为【暂停】状态")
+            self.log_message("💡 请点击「开始下载」按钮或每个任务的「继续」按钮来启动任务")
+            
+            restored_count = 0
             for task_id, task_info in incomplete_tasks.items():
                 url = task_info.get("url", "")
                 download_dir = task_info.get("download_dir", self.download_dir)
-                status = task_info.get("status", "waiting")
+                original_status = task_info.get("status", "waiting")
+                
+                # 关键修改：无论原状态是什么，都设置为 paused
+                # 这样可以避免程序意外退出后，任务处于 running 等不稳定状态
+                forced_status = TaskManager.STATUS_PAUSED
+                
+                # 更新 TaskLogger 中的状态为 paused
+                if self.task_logger:
+                    self.task_logger.update_task_status(task_id, 'paused')
 
                 downloading_files = self.task_logger.get_downloading_files(download_dir)
                 if downloading_files:
-                    self.log_message(f"发现未完成的下载文件: {len(downloading_files)} 个")
+                    self.log_message(f"⚠️  发现未完成的下载文件: {len(downloading_files)} 个")
 
                 if url:
-                    self.restore_task(task_id, url, download_dir, status)
-            self.log_message("任务恢复完成")
+                    self.restore_task(task_id, url, download_dir, status=forced_status)
+                    restored_count += 1
+            
+            self.log_message(f"✅ 任务恢复完成：共 {restored_count} 个任务，全部处于【暂停】状态")
+            self.log_message(f"ℹ️  提示：点击输入框为空时的「开始下载」按钮可批量恢复所有任务")
         else:
-            self.log_message("没有发现未完成的任务")
+            self.log_message("ℹ️ 没有发现未完成的任务")
 
     def restore_task(self, task_id: str, url: str, download_dir: str, status: str = "paused"):
         self._check_latest_headless_setting()
@@ -792,31 +826,16 @@ class MainWindow(QMainWindow):
                 )
 
     def start_download(self) -> None:
+        """
+        开始下载或恢复所有任务
+        - 如果输入框为空：恢复/继续所有暂停、失败、停止的任务
+        - 如果输入框有链接：创建新的下载任务
+        """
         url_input = self.url_input.text().strip()
+        
         if not url_input:
-            self.log_message("正在恢复所有暂停、失败和停止的任务...")
-            # 获取所有未完成任务（状态不为 completed）
-            all_tasks = self.task_logger.get_all_tasks()
-            resumed_count = 0
-            for task_id, task_info in all_tasks.items():
-                if task_info.get("status") not in ["completed", "running"]:
-                    # 如果任务已不在 UI 中（可能已停止且被清理），则重新创建
-                    if task_id not in self.task_manager.task_info_map:
-                        self.restore_task(task_id, task_info["url"],
-                                          task_info.get("download_dir", self.download_dir),
-                                          status=task_info.get("status", TaskManager.STATUS_PAUSED))
-                        resumed_count += 1
-                    else:
-                        # 对于已存在但暂停/失败/停止的任务，恢复它们
-                        existing_info = self.task_manager.task_info_map[task_id]
-                        if existing_info['status'] in [TaskManager.STATUS_STOPPED, TaskManager.STATUS_PAUSED, TaskManager.STATUS_FAILED]:
-                            self.resume_task(existing_info['worker'], force_retry=True)
-                            resumed_count += 1
-            
-            if resumed_count == 0:
-                self.log_message("没有需要恢复的任务")
-            else:
-                self.log_message(f"已恢复 {resumed_count} 个任务")
+            # 输入框为空，恢复所有未完成的任务
+            self._resume_all_tasks()
             return
 
         # 清空输入框
@@ -843,6 +862,67 @@ class MainWindow(QMainWindow):
         
         if created_count > 0:
             self.log_message(f"成功创建 {created_count} 个下载任务")
+    
+    def _resume_all_tasks(self) -> None:
+        """恢复或继续所有未完成的任务"""
+        self.log_message("🔄 正在检查并恢复所有任务...")
+        
+        # 获取所有未完成任务（状态不为 completed 或 running）
+        all_tasks = self.task_logger.get_all_tasks()
+        
+        if not all_tasks:
+            self.log_message("ℹ️ 没有任何任务记录")
+            return
+        
+        resumed_count = 0
+        restored_count = 0
+        already_running_count = 0
+        
+        for task_id, task_info in all_tasks.items():
+            status = task_info.get("status", "unknown")
+            url = task_info.get("url", "")
+            
+            # 跳过已完成和正在运行的任务
+            if status in ["completed", "running"]:
+                if status == "running":
+                    already_running_count += 1
+                continue
+            
+            # 检查任务是否已在 UI 中
+            if task_id in self.task_manager.task_info_map:
+                # 任务已存在，直接恢复
+                existing_info = self.task_manager.task_info_map[task_id]
+                if existing_info['status'] in [TaskManager.STATUS_STOPPED, 
+                                               TaskManager.STATUS_PAUSED, 
+                                               TaskManager.STATUS_FAILED,
+                                               TaskManager.STATUS_PENDING]:
+                    self.resume_task(existing_info['worker'], force_retry=True)
+                    resumed_count += 1
+                    self.log_message(f"✓ 恢复任务: {url[:60]}{'...' if len(url) > 60 else ''}")
+            else:
+                # 任务不在 UI 中，需要重新创建
+                download_dir = task_info.get("download_dir", self.download_dir)
+                self.restore_task(task_id, url, download_dir, status=status)
+                restored_count += 1
+                self.log_message(f"✓ 重建任务: {url[:60]}{'...' if len(url) > 60 else ''} (原状态: {status})")
+        
+        # 输出总结
+        total_action = resumed_count + restored_count
+        if total_action > 0:
+            summary_parts = []
+            if resumed_count > 0:
+                summary_parts.append(f"恢复 {resumed_count} 个")
+            if restored_count > 0:
+                summary_parts.append(f"重建 {restored_count} 个")
+            if already_running_count > 0:
+                summary_parts.append(f"{already_running_count} 个正在运行")
+            
+            self.log_message(f"✅ 操作完成：{'，'.join(summary_parts)}")
+        else:
+            if already_running_count > 0:
+                self.log_message(f"ℹ️ 所有任务都已完成或正在运行（{already_running_count} 个运行中）")
+            else:
+                self.log_message("ℹ️ 没有需要恢复的任务")
 
     def _parse_multiple_urls(self, text: str) -> List[str]:
         """解析文本中的多个URL，支持空格、换行、逗号分隔"""

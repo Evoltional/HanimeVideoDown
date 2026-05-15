@@ -195,218 +195,222 @@ class VideoDownloader:
         if self.progress_callback:
             self.progress_callback(safe_filename, "0%")
 
-        # 外层循环：整体重试次数（应对完全失败的情况）
-        max_overall_retries = self.max_retries
-        overall_retry_count = 0
+        # 重试配置
+        MAX_RETRIES = max(self.max_retries, 5)  # 至少重试5次，应对网络波动
+        BASE_DELAY = 3  # 基础延迟秒数（增加到3秒）
+        
+        for attempt in range(1, MAX_RETRIES + 1):
+            try:
+                success = self._execute_download(
+                    video_url, downloading_file_path, final_file_path,
+                    safe_filename, worker, task_logger, task_id, watch_url
+                )
+                if success:
+                    return True
+                    
+            except requests.exceptions.SSLError as e:
+                # SSL错误：可能是服务器主动断开或证书问题
+                logger.warning(f"SSL错误 ({attempt}/{MAX_RETRIES}): {e}")
+                if worker and hasattr(worker, 'log_signal'):
+                    worker.log_signal.emit(f"⚠ SSL连接错误，{wait_time}秒后重试: {safe_filename}")
+                
+                # 清理临时文件，准备重试
+                self._cleanup_temp_file(downloading_file_path)
+                
+                # SSL错误需要更长的等待时间
+                wait_time = min(BASE_DELAY * (2 ** attempt), 60)  # SSL错误等待更久
+                time.sleep(wait_time)
+                continue
+                
+            except requests.exceptions.ConnectionError as e:
+                # 连接错误：典型的网络波动
+                logger.warning(f"连接错误 ({attempt}/{MAX_RETRIES}): {e}")
+                if worker and hasattr(worker, 'log_signal'):
+                    worker.log_signal.emit(f"⚠ 网络连接失败，{wait_time}秒后重试: {safe_filename}")
+                
+                self._cleanup_temp_file(downloading_file_path)
+                wait_time = min(BASE_DELAY * (2 ** (attempt - 1)), 30)
+                time.sleep(wait_time)
+                continue
+                
+            except requests.exceptions.Timeout as e:
+                # 超时错误
+                logger.warning(f"请求超时 ({attempt}/{MAX_RETRIES}): {e}")
+                if worker and hasattr(worker, 'log_signal'):
+                    worker.log_signal.emit(f"⚠ 请求超时，{wait_time}秒后重试: {safe_filename}")
+                
+                self._cleanup_temp_file(downloading_file_path)
+                wait_time = min(BASE_DELAY * (2 ** (attempt - 1)), 30)
+                time.sleep(wait_time)
+                continue
+                
+            except Exception as e:
+                # 其他异常
+                logger.warning(f"下载尝试 {attempt}/{MAX_RETRIES} 失败: {type(e).__name__}: {e}")
+                
+                # 最后一次尝试失败，直接返回
+                if attempt == MAX_RETRIES:
+                    logger.error("达到最大重试次数")
+                    if worker and hasattr(worker, 'log_signal'):
+                        worker.log_signal.emit(f"✗ 下载失败（超过重试次数）: {safe_filename}")
+                    self._cleanup_temp_file(downloading_file_path)
+                    return False
+                
+                # 指数退避等待
+                wait_time = min(BASE_DELAY * (2 ** (attempt - 1)), 30)
+                logger.info(f"{wait_time}秒后重试...")
+                
+                if worker and hasattr(worker, 'log_signal'):
+                    worker.log_signal.emit(f"↻ 重试 {attempt}/{MAX_RETRIES}: {safe_filename}")
+                
+                # 清理临时文件，准备重试
+                self._cleanup_temp_file(downloading_file_path)
+                time.sleep(wait_time)
+        
+        return False
+
+    def _execute_download(self, video_url: str, downloading_path: str, final_path: str,
+                         safe_filename: str, worker, task_logger, task_id, watch_url) -> bool:
+        """
+        执行单次下载操作（支持断点续传）
+        :return: 是否成功
+        """
+        response = None
         CHECK_INTERVAL = 0.5  # 每0.5秒检查一次暂停/停止
         
-        # 内层配置：网络波动容忍度
-        NETWORK_RETRY_DELAY = 3  # 网络波动时等待3秒
-        MAX_NETWORK_RETRIES = 5  # 最多连续5次网络波动重试后才认为真正失败
-        
-        while overall_retry_count < max_overall_retries:
-            network_retry_count = 0  # 每次整体重试时重置网络重试计数
+        try:
+            # 检查是否有未完成的下载，支持断点续传
+            resume_position = 0
+            if os.path.exists(downloading_path):
+                resume_position = os.path.getsize(downloading_path)
+                if resume_position > 0:
+                    logger.info(f"发现未完成文件，从 {self._format_size(resume_position)} 处续传")
+                    if worker and hasattr(worker, 'log_signal'):
+                        worker.log_signal.emit(f"↻ 断点续传: {safe_filename} (已下载 {self._format_size(resume_position)})")
             
-            try:
-                response = self.session.get(video_url, stream=True, timeout=30)
+            # 设置请求头，支持断点续传
+            headers = {}
+            if resume_position > 0:
+                headers['Range'] = f'bytes={resume_position}-'
+            
+            # 分离连接超时和读取超时（增加读取超时以应对大文件）
+            timeout_config = (
+                15,  # 连接超时15秒
+                120  # 读取超时120秒（每个chunk），应对网络波动
+            )
+            response = self.session.get(video_url, stream=True, timeout=timeout_config, headers=headers)
+            
+            # 206表示部分内容（续传），200表示完整下载
+            if response.status_code not in [200, 206]:
                 response.raise_for_status()
 
-                total_size = int(response.headers.get('content-length', 0))
-                downloaded_size = 0
-                last_check_time = time.time()
-                consecutive_network_errors = 0  # 连续网络错误计数器
-
-                os.makedirs(self.download_dir, exist_ok=True)
-
-                with open(downloading_file_path, 'wb') as f:
-                    for chunk in response.iter_content(chunk_size=8192):
-                        if chunk:
-                            try:
-                                f.write(chunk)
-                                downloaded_size += len(chunk)
-                                consecutive_network_errors = 0  # 成功写入，重置计数器
-                            except IOError as write_error:
-                                # 磁盘写入错误，可能是网络导致的IO问题
-                                consecutive_network_errors += 1
-                                logger.warning(f"写入数据块时出错 ({consecutive_network_errors}/{MAX_NETWORK_RETRIES}): {write_error}")
-                                
-                                if consecutive_network_errors >= MAX_NETWORK_RETRIES:
-                                    logger.error(f"连续{MAX_NETWORK_RETRIES}次写入失败，判定为严重错误")
-                                    response.close()
-                                    raise
-                                
-                                # 等待3秒后重试当前块
-                                logger.info(f"等待{NETWORK_RETRY_DELAY}秒后重试...")
-                                time.sleep(NETWORK_RETRY_DELAY)
-                                continue
-
-                            # 基于时间检查暂停/停止
-                            now = time.time()
-                            if now - last_check_time >= CHECK_INTERVAL:
-                                last_check_time = now
-                                if worker and hasattr(worker, 'should_stop') and worker.should_stop():
-                                    logger.warning("下载已被停止")
-                                    response.close()
-                                    if os.path.exists(downloading_file_path):
-                                        try:
-                                            os.remove(downloading_file_path)
-                                            logger.info("已删除临时文件")
-                                        except Exception as e:
-                                            logger.error(f"删除临时文件失败: {e}")
-                                    return False
-
-                                if worker and hasattr(worker, 'should_pause') and worker.should_pause():
-                                    logger.warning("下载已被暂停")
-                                    while worker.should_pause() and not worker.should_stop():
-                                        time.sleep(0.1)
-                                    if worker.should_stop():
-                                        return False
-
-                            if total_size > 0:
-                                progress = (downloaded_size / total_size) * 100
-                                progress_str = f"{progress:.1f}% ({self._format_size(downloaded_size)}/{self._format_size(total_size)})"
-                                if self.progress_callback:
-                                    self.progress_callback(safe_filename, progress_str)
-                            else:
-                                if self.progress_callback:
-                                    self.progress_callback(safe_filename, f"{self._format_size(downloaded_size)}")
-
-                logger.info("下载完成，正在重命名文件...")
-
-                try:
-                    os.replace(downloading_file_path, final_file_path)
-                    logger.info(f"文件重命名完成: {final_file_path}")
-                    # 发送日志到UI
-                    if worker and hasattr(worker, 'log_signal'):
-                        worker.log_signal.emit(f"✓ 下载完成: {safe_filename}")
-                    if self.progress_callback:
-                        self.progress_callback(safe_filename, "100.0%")
-                except Exception as e:
-                    logger.error(f"文件重命名失败: {e}")
-                    if worker and hasattr(worker, 'log_signal'):
-                        worker.log_signal.emit(f"✗ 文件重命名失败: {safe_filename} - {str(e)}")
-                    return False
-
-                if task_logger and task_id:
-                    # 使用 watch_url 移除对应的原始链接
-                    task_logger.add_downloaded_video(task_id, safe_filename,
-                                                     video_url=watch_url if watch_url else video_url)
-
-                return True
-
-            except requests.exceptions.ConnectionError as e:
-                # 连接错误：典型的网络波动，等待3秒后重试当前整体请求
-                network_retry_count += 1
-                if network_retry_count <= MAX_NETWORK_RETRIES:
-                    wait_time = NETWORK_RETRY_DELAY
-                    logger.warning(f"网络连接波动 ({network_retry_count}/{MAX_NETWORK_RETRIES})，等待{wait_time}秒后重试: {e}")
-                    # 发送日志到UI
-                    if worker and hasattr(worker, 'log_signal'):
-                        worker.log_signal.emit(f"⚠ 网络波动 ({network_retry_count}/{MAX_NETWORK_RETRIES})，{wait_time}秒后重试: {safe_filename}")
-                    time.sleep(wait_time)
-                    continue
-                else:
-                    logger.error(f"连续{MAX_NETWORK_RETRIES}次网络波动，尝试整体重试")
-                    # 发送日志到UI
-                    if worker and hasattr(worker, 'log_signal'):
-                        worker.log_signal.emit(f"✗ 网络波动严重，准备重试: {safe_filename}")
-                    # 清理临时文件，进入下一轮整体重试
-                    if os.path.exists(downloading_file_path):
-                        try:
-                            os.remove(downloading_file_path)
-                            logger.info("已清理临时文件准备重试")
-                        except Exception as cleanup_err:
-                            logger.error(f"清理临时文件失败: {cleanup_err}")
-                    
-                    overall_retry_count += 1
-                    if overall_retry_count < max_overall_retries:
-                        wait_time = min(2 ** overall_retry_count, 30)
-                        logger.info(f"整体重试 {overall_retry_count}/{max_overall_retries}，等待{wait_time}秒")
-                        if worker and hasattr(worker, 'log_signal'):
-                            worker.log_signal.emit(f"↻ 整体重试 {overall_retry_count}/{max_overall_retries}: {safe_filename}")
-                        time.sleep(wait_time)
-                        continue
-                    else:
-                        logger.error("下载最终失败：超过最大重试次数")
-                        if worker and hasattr(worker, 'log_signal'):
-                            worker.log_signal.emit(f"✗ 下载失败（超过重试次数）: {safe_filename}")
-                        return False
-                        
-            except requests.exceptions.Timeout as e:
-                # 超时错误：也视为网络波动，等待3秒后重试当前整体请求
-                network_retry_count += 1
-                if network_retry_count <= MAX_NETWORK_RETRIES:
-                    wait_time = NETWORK_RETRY_DELAY
-                    logger.warning(f"请求超时 ({network_retry_count}/{MAX_NETWORK_RETRIES})，等待{wait_time}秒后重试: {e}")
-                    time.sleep(wait_time)
-                    continue
-                else:
-                    logger.error(f"连续{MAX_NETWORK_RETRIES}次超时，尝试整体重试")
-                    if os.path.exists(downloading_file_path):
-                        try:
-                            os.remove(downloading_file_path)
-                            logger.info("已清理临时文件准备重试")
-                        except Exception as cleanup_err:
-                            logger.error(f"清理临时文件失败: {cleanup_err}")
-                    
-                    overall_retry_count += 1
-                    if overall_retry_count < max_overall_retries:
-                        wait_time = min(2 ** overall_retry_count, 30)
-                        logger.info(f"整体重试 {overall_retry_count}/{max_overall_retries}，等待{wait_time}秒")
-                        time.sleep(wait_time)
-                        continue
-                    else:
-                        logger.error("下载最终失败：超过最大重试次数")
-                        return False
-                        
-            except requests.exceptions.RequestException as e:
-                # 其他请求异常：先尝试网络波动重试，再整体重试
-                network_retry_count += 1
-                if network_retry_count <= MAX_NETWORK_RETRIES:
-                    wait_time = NETWORK_RETRY_DELAY
-                    logger.warning(f"请求异常 ({network_retry_count}/{MAX_NETWORK_RETRIES})，等待{wait_time}秒后重试: {e}")
-                    time.sleep(wait_time)
-                    continue
-                else:
-                    logger.error(f"连续{MAX_NETWORK_RETRIES}次请求异常，尝试整体重试")
-                    if os.path.exists(downloading_file_path):
-                        try:
-                            os.remove(downloading_file_path)
-                            logger.info("已清理临时文件准备重试")
-                        except Exception as cleanup_err:
-                            logger.error(f"清理临时文件失败: {cleanup_err}")
-                    
-                    overall_retry_count += 1
-                    if overall_retry_count < max_overall_retries:
-                        wait_time = min(2 ** overall_retry_count, 30)
-                        logger.info(f"整体重试 {overall_retry_count}/{max_overall_retries}，等待{wait_time}秒")
-                        time.sleep(wait_time)
-                        continue
-                    else:
-                        logger.error("下载最终失败：超过最大重试次数")
-                        return False
-                        
-            except Exception as e:
-                # 未知异常：直接计入整体重试，不浪费在网络重试上
-                logger.exception(f"下载过程中发生未知异常")
-                if os.path.exists(downloading_file_path):
+            total_size = int(response.headers.get('content-length', 0))
+            # 如果是续传，total_size是剩余大小，需要加上已下载的部分
+            if resume_position > 0 and response.status_code == 206:
+                # 尝试从Content-Range头获取总大小
+                content_range = response.headers.get('content-range', '')
+                if content_range and '/' in content_range:
                     try:
-                        os.remove(downloading_file_path)
-                        logger.info("已清理临时文件")
-                    except Exception as cleanup_err:
-                        logger.error(f"清理临时文件失败: {cleanup_err}")
-                
-                overall_retry_count += 1
-                if overall_retry_count < max_overall_retries:
-                    wait_time = min(2 ** overall_retry_count, 30)
-                    logger.warning(f"整体重试 {overall_retry_count}/{max_overall_retries}，等待{wait_time}秒: {e}")
-                    time.sleep(wait_time)
-                    continue
-                else:
-                    logger.error("下载最终失败：超过最大重试次数")
-                    return False
+                        total_size = int(content_range.split('/')[-1])
+                    except:
+                        total_size += resume_position
+            
+            downloaded_size = resume_position
+            last_check_time = time.time()
 
-        return False
+            os.makedirs(self.download_dir, exist_ok=True)
+
+            # 根据是否有续传决定打开模式
+            mode = 'ab' if resume_position > 0 else 'wb'
+            
+            with open(downloading_path, mode) as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    if chunk:
+                        try:
+                            f.write(chunk)
+                            downloaded_size += len(chunk)
+                        except IOError as write_error:
+                            logger.error(f"写入数据块时出错: {write_error}")
+                            raise
+
+                        # 基于时间检查暂停/停止
+                        now = time.time()
+                        if now - last_check_time >= CHECK_INTERVAL:
+                            last_check_time = now
+                            
+                            # 检查停止信号
+                            if worker and hasattr(worker, 'should_stop') and worker.should_stop():
+                                logger.warning("下载已被停止")
+                                response.close()
+                                if os.path.exists(downloading_path):
+                                    try:
+                                        os.remove(downloading_path)
+                                        logger.info("已删除临时文件")
+                                    except Exception as e:
+                                        logger.error(f"删除临时文件失败: {e}")
+                                return False
+
+                            # 检查暂停信号
+                            if worker and hasattr(worker, 'should_pause'):
+                                if worker.should_pause(timeout=0.5):
+                                    logger.info("下载已暂停，等待恢复...")
+                                    # 持续检查直到恢复或停止
+                                    while worker.should_pause(timeout=0.5):
+                                        if worker.should_stop():
+                                            logger.warning("暂停期间收到停止指令")
+                                            response.close()
+                                            if os.path.exists(downloading_path):
+                                                try:
+                                                    os.remove(downloading_path)
+                                                except:
+                                                    pass
+                                            return False
+                                    logger.info("下载已恢复")
+
+                        if total_size > 0:
+                            progress = (downloaded_size / total_size) * 100
+                            progress_str = f"{progress:.1f}% ({self._format_size(downloaded_size)}/{self._format_size(total_size)})"
+                            if self.progress_callback:
+                                self.progress_callback(safe_filename, progress_str)
+                        else:
+                            if self.progress_callback:
+                                self.progress_callback(safe_filename, f"{self._format_size(downloaded_size)}")
+
+            logger.info("下载完成，正在重命名文件...")
+
+            try:
+                os.replace(downloading_path, final_path)
+                logger.info(f"文件重命名完成: {final_path}")
+                # 发送日志到UI
+                if worker and hasattr(worker, 'log_signal'):
+                    worker.log_signal.emit(f"✓ 下载完成: {safe_filename}")
+                if self.progress_callback:
+                    self.progress_callback(safe_filename, "100.0%")
+            except Exception as e:
+                logger.error(f"文件重命名失败: {e}")
+                if worker and hasattr(worker, 'log_signal'):
+                    worker.log_signal.emit(f"✗ 文件重命名失败: {safe_filename} - {str(e)}")
+                return False
+
+            if task_logger and task_id:
+                # 使用 watch_url 移除对应的原始链接
+                task_logger.add_downloaded_video(task_id, safe_filename,
+                                                 video_url=watch_url if watch_url else video_url)
+
+            return True
+
+        finally:
+            if response:
+                response.close()
+
+    def _cleanup_temp_file(self, file_path: str):
+        """清理临时文件"""
+        if os.path.exists(file_path):
+            try:
+                os.remove(file_path)
+                logger.info(f"已清理临时文件: {file_path}")
+            except Exception as e:
+                logger.error(f"清理临时文件失败: {e}")
 
     async def download_from_page(self, download_page_url: str, worker=None, task_logger=None, task_id=None,
                                  use_bypass: bool = False) -> bool:
@@ -829,10 +833,14 @@ class DownloadWorker(QThread):
             self._loop = None
 
     def on_progress_update(self, filename: str, progress: str):
+        """节流进度更新，避免UI卡顿"""
         current_time = time.time()
         with self._progress_lock:
             last_time = self._last_progress_time.get(filename, 0)
-            if current_time - last_time < 0.2 and progress != "100.0%" and progress != "已完成":
+            # 降低更新频率到0.5秒（原来是0.2秒）
+            MIN_UPDATE_INTERVAL = 0.5
+            
+            if current_time - last_time < MIN_UPDATE_INTERVAL and progress != "100.0%" and progress != "已完成":
                 return
             self._last_progress_time[filename] = current_time
 
@@ -906,10 +914,52 @@ class DownloadWorker(QThread):
             return True
 
     def stop(self):
+        """立即停止所有操作，清理资源"""
         self._is_running = False
+        self._is_paused = False
         self._pause_event.set()
-        if self.scraper and self._loop and self._loop.is_running():
-            asyncio.run_coroutine_threadsafe(self.scraper.close_all_browsers(), self._loop)
+        
+        # 关闭所有活动连接
+        if hasattr(self, '_session') and self._session:
+            try:
+                self._session.close()
+                logger.info("已关闭HTTP会话")
+            except Exception as e:
+                logger.error(f"关闭HTTP会话失败: {e}")
+        
+        # 强制关闭浏览器（增强错误处理）
+        if self.scraper and self._loop:
+            try:
+                # 检查事件循环状态
+                if not self._loop.is_closed():
+                    if self._loop.is_running():
+                        # 在运行中的事件循环中异步关闭
+                        future = asyncio.run_coroutine_threadsafe(
+                            self.scraper.close_all_browsers(), 
+                            self._loop
+                        )
+                        try:
+                            # 等待最多3秒
+                            future.result(timeout=3)
+                            logger.info("已关闭所有浏览器实例")
+                        except asyncio.TimeoutError:
+                            logger.warning("关闭浏览器超时，强制继续")
+                        except Exception as e:
+                            logger.error(f"异步关闭浏览器失败: {e}")
+                    else:
+                        # 事件循环未运行，直接运行
+                        try:
+                            self._loop.run_until_complete(self.scraper.close_all_browsers())
+                            logger.info("已关闭所有浏览器实例")
+                        except RuntimeError as e:
+                            if "Event loop is closed" in str(e):
+                                logger.warning("事件循环已关闭，跳过浏览器清理")
+                            else:
+                                raise
+                else:
+                    logger.warning("事件循环已关闭，跳过浏览器清理")
+            except Exception as e:
+                logger.error(f"停止时关闭浏览器失败: {e}")
 
     def pause(self):
         self._is_paused = True
@@ -924,12 +974,20 @@ class DownloadWorker(QThread):
             self.failed_links_to_retry = self.task_logger.get_task_failed_links(self.task_id)
             self.retry_failed_links = bool(self.failed_links_to_retry)
 
-    def should_pause(self) -> bool:
+    def should_pause(self, timeout=0.5) -> bool:
+        """
+        检查是否暂停，如果是则等待直到恢复或停止
+        :param timeout: 每次等待的超时时间（秒）
+        :return: 如果仍在暂停状态返回True，否则返回False
+        """
         if not self._is_paused:
             return False
-        while self._is_paused and self._is_running:
-            self._pause_event.wait(0.1)
-        return False
+        
+        # 使用Event等待，避免忙等待消耗CPU
+        self._pause_event.wait(timeout)
+        
+        # 如果仍然暂停，返回True表示需要继续等待
+        return self._is_paused
 
     def should_stop(self) -> bool:
         return not self._is_running

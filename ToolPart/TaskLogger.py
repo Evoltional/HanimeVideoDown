@@ -268,11 +268,11 @@ class TaskLogger:
         timestamp = datetime.now().strftime("%H:%M:%S")
         return f"[{timestamp}] {level.value} - {message}"
 
-    def update_exis_file(self, storage_dir: str) -> List[str]:
+    def update_exis_file(self, storage_dir: str) -> List[dict]:
         """
-        扫描存储目录中的所有视频文件，并添加到Exis.json（追加模式）
+        扫描存储目录中的所有视频文件，返回文件名和路径信息
         :param storage_dir: 存储目录路径
-        :return: 找到的视频文件名列表
+        :return: 找到的视频文件列表，每个元素为 {"filename": 文件名, "path": 完整路径}
         """
         import re
         video_extensions = {'.mp4', '.avi', '.mkv', '.mov', '.wmv', '.flv', '.webm'}
@@ -284,9 +284,15 @@ class TaskLogger:
                 for filename in files:
                     _, ext = os.path.splitext(filename)
                     if ext.lower() in video_extensions:
-                        # 删除 [中字後補] 及其前后空格后保存
+                        # 删除 [中字後補] 及其前后空格
                         cleaned_filename = re.sub(r'\s*\[中字後補\]\s*', '', filename)
-                        video_files.append(cleaned_filename)
+                        # 构建完整路径
+                        full_path = os.path.join(root, filename)
+                        # 保存文件名和路径信息
+                        video_files.append({
+                            "filename": cleaned_filename,
+                            "path": full_path
+                        })
             
             return video_files
             
@@ -297,6 +303,8 @@ class TaskLogger:
     def batch_update_exis_file(self, storage_dirs: List[str]) -> int:
         """
         批量扫描多个存储目录，更新Exis.json
+        Exis.json格式：[{"filename": "文件名", "path": "完整路径"}, ...]
+        按文件名排序
         :param storage_dirs: 存储目录列表
         :return: 总共找到的视频文件数量
         """
@@ -307,8 +315,17 @@ class TaskLogger:
             video_files = self.update_exis_file(storage_dir)
             all_video_files.extend(video_files)
         
-        # 去重
-        unique_files = list(set(all_video_files))
+        # 去重（基于文件名）
+        seen_filenames = set()
+        unique_files = []
+        for file_info in all_video_files:
+            filename = file_info.get("filename", "")
+            if filename not in seen_filenames:
+                seen_filenames.add(filename)
+                unique_files.append(file_info)
+        
+        # 按文件名排序（不区分大小写）
+        unique_files.sort(key=lambda x: x.get("filename", "").lower())
         
         # 保存到Exis.json（覆盖原有内容）
         try:
@@ -316,7 +333,7 @@ class TaskLogger:
                 with open(self.exis_file, 'w', encoding='utf-8') as f:
                     json.dump(unique_files, f, indent=4, ensure_ascii=False)
             
-            logger.info(f"已更新Exis.json，共找到 {len(unique_files)} 个唯一视频文件")
+            logger.info(f"已更新Exis.json，共找到 {len(unique_files)} 个唯一视频文件（已按名称排序）")
             return len(unique_files)
         except Exception as e:
             logger.error(f"保存Exis.json时出错: {e}")
@@ -340,8 +357,19 @@ class TaskLogger:
                 import re
                 cleaned_filename = re.sub(r'\s*\[中字後補\]\s*', '', filename)
                 
-                # 同时检查原始文件名和清理后的文件名
-                return filename in existing_videos or cleaned_filename in existing_videos
+                # 检查是否存在（兼容旧格式和新格式）
+                for video_info in existing_videos:
+                    if isinstance(video_info, dict):
+                        # 新格式：{"filename": "...", "path": "..."}
+                        existing_name = video_info.get("filename", "")
+                        if filename == existing_name or cleaned_filename == existing_name:
+                            return True
+                    else:
+                        # 旧格式：直接是文件名字符串
+                        if filename == video_info or cleaned_filename == video_info:
+                            return True
+                
+                return False
         except Exception as e:
             logger.error(f"检查视频是否存在时出错: {e}")
             return False
