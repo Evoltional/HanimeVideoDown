@@ -71,10 +71,10 @@ class TaskLogger:
     # ---------- 修改点：将移除链接的逻辑独立出来 ----------
     def add_downloaded_video(self, task_id: str, video_filename: str, video_url: str = None) -> None:
         """
-        添加已下载的视频记录，并从 video_links 中移除对应的链接（如果提供）
+        添加已下载的视频记录，并从 video_links 和 failed_links 中移除对应的链接（如果提供）
         :param task_id: 任务 ID
         :param video_filename: 视频文件名
-        :param video_url: 可选的视频 URL，如果提供则从 video_links 中移除
+        :param video_url: 可选的视频 URL，如果提供则从 video_links 和 failed_links 中移除
         """
         import re
         with self.lock:
@@ -85,12 +85,22 @@ class TaskLogger:
                     tasks[task_id]["downloaded_videos"] = []
 
                 # 1. 无论文件名是否已存在，都尝试移除链接（关键修复）
-                if video_url and "video_links" in tasks[task_id]:
-                    video_links = tasks[task_id]["video_links"]
-                    if video_url in video_links:
-                        video_links.remove(video_url)
-                        tasks[task_id]["video_links"] = video_links
-                        self.log(LogLevel.INFO, f"已从任务 {task_id} 的视频链接列表中移除：{video_url}")
+                if video_url:
+                    # 从 video_links 中移除
+                    if "video_links" in tasks[task_id]:
+                        video_links = tasks[task_id]["video_links"]
+                        if video_url in video_links:
+                            video_links.remove(video_url)
+                            tasks[task_id]["video_links"] = video_links
+                            self.log(LogLevel.INFO, f"已从任务 {task_id} 的视频链接列表中移除：{video_url}")
+                    
+                    # 从 failed_links 中移除
+                    if "failed_links" in tasks[task_id]:
+                        failed_links = tasks[task_id]["failed_links"]
+                        if video_url in failed_links:
+                            failed_links.remove(video_url)
+                            tasks[task_id]["failed_links"] = failed_links
+                            self.log(LogLevel.INFO, f"已从失败链接中移除：{video_url}")
 
                 # 2. 删除 [中字後補] 及其前后空格后保存
                 cleaned_filename = re.sub(r'\s*\[中字後補\]\s*', '', video_filename)
@@ -150,16 +160,27 @@ class TaskLogger:
 
     def get_remaining_video_links(self, task_id: str) -> List[str]:
         """
-        获取任务剩余未下载的视频链接（包括失败的链接）
+        获取任务剩余未下载的视频链接（包括失败的链接），排除已下载的
         :param task_id: 任务 ID
         :return: 剩余的视频链接列表
         """
         with self.lock:
             tasks = self._load_tasks()
             if task_id in tasks:
-                video_links = tasks[task_id].get("video_links", [])
-                failed_links = tasks[task_id].get("failed_links", [])
-                remaining_links = list(set(video_links + failed_links))
+                video_links = set(tasks[task_id].get("video_links", []))
+                failed_links = set(tasks[task_id].get("failed_links", []))
+                downloaded_videos = set(tasks[task_id].get("downloaded_videos", []))
+                
+                # 合并 video_links 和 failed_links，然后排除已下载的
+                remaining_links = list((video_links | failed_links) - downloaded_videos)
+                
+                self.log(LogLevel.DEBUG, 
+                    f"任务 {task_id[:8]} 剩余链接计算: "
+                    f"video_links={len(video_links)}, "
+                    f"failed_links={len(failed_links)}, "
+                    f"downloaded={len(downloaded_videos)}, "
+                    f"remaining={len(remaining_links)}")
+                
                 return remaining_links
             return []
 

@@ -89,6 +89,12 @@ class VideoDownloader:
 
         try:
             logger.info(f"访问下载页面: {download_page_url}")
+            # 判断是 watch 还是 download 页面
+            if '/download?' in download_page_url:
+                logger.info("✓ 检测到 download 页面，直接提取下载链接（跳过 watch 页面扫描）")
+            elif '/watch?' in download_page_url:
+                logger.info("⚠ 检测到 watch 页面，需要解析视频列表")
+            
             await browser.go_to(download_page_url, use_bypass=use_bypass)
             # 等待表格出现
             table_element = await browser.wait_for_element(
@@ -210,39 +216,65 @@ class VideoDownloader:
                     
             except requests.exceptions.SSLError as e:
                 # SSL错误：可能是服务器主动断开或证书问题
+                wait_time = min(BASE_DELAY * (2 ** attempt), 60)
                 logger.warning(f"SSL错误 ({attempt}/{MAX_RETRIES}): {e}")
                 if worker and hasattr(worker, 'log_signal'):
-                    worker.log_signal.emit(f"⚠ SSL连接错误，{wait_time}秒后重试: {safe_filename}")
+                    worker.log_signal.emit(f"⚠ SSL连接错误，{wait_time}秒后重试 ({attempt}/{MAX_RETRIES}): {safe_filename}")
                 
                 # 清理临时文件，准备重试
                 self._cleanup_temp_file(downloading_file_path)
-                
-                # SSL错误需要更长的等待时间
-                wait_time = min(BASE_DELAY * (2 ** attempt), 60)  # SSL错误等待更久
                 time.sleep(wait_time)
                 continue
                 
             except requests.exceptions.ConnectionError as e:
                 # 连接错误：典型的网络波动
+                wait_time = min(BASE_DELAY * (2 ** (attempt - 1)), 30)
                 logger.warning(f"连接错误 ({attempt}/{MAX_RETRIES}): {e}")
                 if worker and hasattr(worker, 'log_signal'):
-                    worker.log_signal.emit(f"⚠ 网络连接失败，{wait_time}秒后重试: {safe_filename}")
+                    worker.log_signal.emit(f"⚠ 网络连接失败，{wait_time}秒后重试 ({attempt}/{MAX_RETRIES}): {safe_filename}")
                 
                 self._cleanup_temp_file(downloading_file_path)
-                wait_time = min(BASE_DELAY * (2 ** (attempt - 1)), 30)
                 time.sleep(wait_time)
                 continue
                 
             except requests.exceptions.Timeout as e:
                 # 超时错误
+                wait_time = min(BASE_DELAY * (2 ** (attempt - 1)), 30)
                 logger.warning(f"请求超时 ({attempt}/{MAX_RETRIES}): {e}")
                 if worker and hasattr(worker, 'log_signal'):
-                    worker.log_signal.emit(f"⚠ 请求超时，{wait_time}秒后重试: {safe_filename}")
+                    worker.log_signal.emit(f"⚠ 请求超时，{wait_time}秒后重试 ({attempt}/{MAX_RETRIES}): {safe_filename}")
                 
                 self._cleanup_temp_file(downloading_file_path)
-                wait_time = min(BASE_DELAY * (2 ** (attempt - 1)), 30)
                 time.sleep(wait_time)
                 continue
+                
+            except requests.exceptions.HTTPError as e:
+                # HTTP错误：根据状态码决定是否重试
+                http_status = getattr(e.response, 'status_code', None) if hasattr(e, 'response') else None
+                logger.warning(f"HTTP错误 ({attempt}/{MAX_RETRIES}): {e}, 状态码: {http_status}")
+                
+                if http_status and http_status >= 500:
+                    # 服务器错误，可以重试
+                    wait_time = min(BASE_DELAY * (2 ** (attempt - 1)), 30)
+                    if worker and hasattr(worker, 'log_signal'):
+                        worker.log_signal.emit(f"⚠ 服务器错误({http_status})，{wait_time}秒后重试: {safe_filename}")
+                    self._cleanup_temp_file(downloading_file_path)
+                    time.sleep(wait_time)
+                    continue
+                elif http_status == 403:
+                    # 访问被拒绝，不重试
+                    logger.error("访问被拒绝(403)，可能是IP被封或需要验证")
+                    if worker and hasattr(worker, 'log_signal'):
+                        worker.log_signal.emit(f"✗ 访问被拒绝(403)，请检查是否需要启用Bypass模式: {safe_filename}")
+                    self._cleanup_temp_file(downloading_file_path)
+                    return False
+                else:
+                    # 其他HTTP错误，不重试
+                    logger.error(f"HTTP错误({http_status})，不重试")
+                    if worker and hasattr(worker, 'log_signal'):
+                        worker.log_signal.emit(f"✗ HTTP错误({http_status}): {safe_filename}")
+                    self._cleanup_temp_file(downloading_file_path)
+                    return False
                 
             except Exception as e:
                 # 其他异常
@@ -252,7 +284,7 @@ class VideoDownloader:
                 if attempt == MAX_RETRIES:
                     logger.error("达到最大重试次数")
                     if worker and hasattr(worker, 'log_signal'):
-                        worker.log_signal.emit(f"✗ 下载失败（超过重试次数）: {safe_filename}")
+                        worker.log_signal.emit(f"✗ 下载失败（超过{MAX_RETRIES}次重试）: {safe_filename}")
                     self._cleanup_temp_file(downloading_file_path)
                     return False
                 
@@ -261,7 +293,7 @@ class VideoDownloader:
                 logger.info(f"{wait_time}秒后重试...")
                 
                 if worker and hasattr(worker, 'log_signal'):
-                    worker.log_signal.emit(f"↻ 重试 {attempt}/{MAX_RETRIES}: {safe_filename}")
+                    worker.log_signal.emit(f"↻ 重试 {attempt}/{MAX_RETRIES} ({wait_time}秒后): {safe_filename}")
                 
                 # 清理临时文件，准备重试
                 self._cleanup_temp_file(downloading_file_path)
@@ -282,8 +314,9 @@ class VideoDownloader:
             # 检查是否有未完成的下载，支持断点续传
             resume_position = 0
             if os.path.exists(downloading_path):
-                resume_position = os.path.getsize(downloading_path)
-                if resume_position > 0:
+                file_size = os.path.getsize(downloading_path)
+                if file_size > 0:
+                    resume_position = file_size
                     logger.info(f"发现未完成文件，从 {self._format_size(resume_position)} 处续传")
                     if worker and hasattr(worker, 'log_signal'):
                         worker.log_signal.emit(f"↻ 断点续传: {safe_filename} (已下载 {self._format_size(resume_position)})")
@@ -298,11 +331,30 @@ class VideoDownloader:
                 15,  # 连接超时15秒
                 120  # 读取超时120秒（每个chunk），应对网络波动
             )
-            response = self.session.get(video_url, stream=True, timeout=timeout_config, headers=headers)
+            
+            # 尝试请求，如果失败则重建Session后重试
+            try:
+                response = self.session.get(video_url, stream=True, timeout=timeout_config, headers=headers)
+            except requests.exceptions.RequestException as e:
+                logger.warning(f"首次请求失败，尝试重建Session后重试: {e}")
+                self._session = None
+                response = self.session.get(video_url, stream=True, timeout=timeout_config, headers=headers)
             
             # 206表示部分内容（续传），200表示完整下载
             if response.status_code not in [200, 206]:
-                response.raise_for_status()
+                # 如果是416错误且是断点续传，说明服务器不支持，重新开始下载
+                if response.status_code == 416 and resume_position > 0:
+                    logger.warning("服务器不支持断点续传(Range 416)，重新开始下载")
+                    response.close()
+                    if os.path.exists(downloading_path):
+                        os.remove(downloading_path)
+                    headers.pop('Range', None)
+                    response = self.session.get(video_url, stream=True, timeout=timeout_config, headers=headers)
+                    if response.status_code != 200:
+                        response.raise_for_status()
+                    resume_position = 0
+                else:
+                    response.raise_for_status()
 
             total_size = int(response.headers.get('content-length', 0))
             # 如果是续传，total_size是剩余大小，需要加上已下载的部分
@@ -617,7 +669,13 @@ class HanimeScraper:
     # ---------- 修改点3：接收原始链接和下载链接 ----------
     async def _process_single_link_with_browser(self, original_link: str, download_link: str, browser: BrowserManager,
                                                 worker) -> bool:
-        logger.info(f"处理链接: {download_link} (原始: {original_link})")
+        # 判断是否是重试模式
+        is_retry = '/download?' in download_link and '/watch?' in original_link
+        if is_retry:
+            logger.info(f"🔄 重试失败链接: {original_link}")
+            logger.info(f"   → 使用 download 页面直接提取: {download_link[:60]}...")
+        else:
+            logger.info(f"处理链接: {download_link} (原始: {original_link})")
 
         video_id_match = re.search(r'download\?v=([^&]+)', download_link)
         if video_id_match:
@@ -722,11 +780,22 @@ class HanimeScraper:
             except queue.Empty:
                 break
 
-        for original_link in links_batch:
-            if '/watch?' in original_link:
-                download_link = original_link.replace('/watch?', '/download?')
+        for link in links_batch:
+            # 智能判断链接类型：如果已经是 download 链接，直接使用；否则转换
+            if '/download?' in link:
+                # 已经是 download 链接，将其还原为 watch 作为 original_link
+                original_link = link.replace('/download?', '/watch?')
+                download_link = link
+                logger.info(f"检测到 download 链接，将直接访问下载页面: {download_link[:60]}...")
+            elif '/watch?' in link:
+                # watch 链接，需要转换
+                download_link = link.replace('/watch?', '/download?')
+                original_link = link
             else:
-                download_link = original_link
+                # 其他情况，假设是原始链接
+                download_link = link
+                original_link = link
+            
             # 放入元组 (original_link, download_link)
             self.link_queue.put((original_link, download_link))
 
@@ -779,6 +848,8 @@ class DownloadWorker(QThread):
         self.failed_links_to_retry = []
         self.is_restored = is_restored
         self._loop = None
+        self.retry_count = 0  # 任务重试计数器
+        self.max_task_retries = 3  # 最大任务重试次数
 
         if task_logger and task_id:
             self.failed_links_to_retry = task_logger.get_task_failed_links(task_id)
@@ -865,8 +936,20 @@ class DownloadWorker(QThread):
         if self.should_pause():
             return False
 
+        # 检查是否超过最大重试次数
+        if self.retry_failed_links and self.retry_count >= self.max_task_retries:
+            self.log_signal.emit(f"✗ 任务已达到最大重试次数({self.max_task_retries})，不再重试")
+            logger.warning(f"任务 {self.task_id} 达到最大重试次数")
+            return False
+
         remaining_links = []
-        if self.is_restored and self.task_logger and self.task_id:
+        
+        # 如果是重试模式，只处理失败链接（已转换为 download 格式）
+        if self.retry_failed_links and self.failed_links_to_retry:
+            remaining_links = self.failed_links_to_retry
+            self.log_signal.emit(f"🔄 重试模式：将处理 {len(remaining_links)} 个失败链接")
+            self.log_signal.emit(f"💡 使用 download 页面直接提取，跳过 watch 页面扫描")
+        elif self.is_restored and self.task_logger and self.task_id:
             all_tasks = self.task_logger.get_all_tasks()
             task_data = all_tasks.get(self.task_id, {})
             stored_video_links = task_data.get('video_links', [])
@@ -890,7 +973,13 @@ class DownloadWorker(QThread):
             self.log_signal.emit("没有找到任何视频链接")
             return False
 
-        self.log_signal.emit(f"开始处理 {len(remaining_links)} 个剩余视频链接...")
+        # 如果是重试模式，增加重试计数
+        if self.retry_failed_links:
+            self.retry_count += 1
+            self.log_signal.emit(f"🔄 第 {self.retry_count}/{self.max_task_retries} 次重试，处理 {len(remaining_links)} 个链接...")
+        else:
+            self.log_signal.emit(f"开始处理 {len(remaining_links)} 个剩余视频链接...")
+        
         await self.scraper.process_links_batch(remaining_links, self)
 
         failed_links = self.scraper.get_failed_links()
