@@ -525,7 +525,7 @@ class MainWindow(QMainWindow):
         
         # 初始化时扫描所有存储目录并更新Exis.json
         self.log_message("正在初始化，扫描所有存储目录中的视频文件...")
-        total_count = self.task_logger.batch_update_exis_file(self.storage_dirs)
+        total_count = self.task_logger.batch_update_exis_file(self.storage_dirs, incremental=True)
         for storage_dir in self.storage_dirs:
             self.log_message(f"已扫描目录: {storage_dir}")
         self.log_message(f"初始化完成，共记录 {total_count} 个唯一视频文件")
@@ -666,8 +666,8 @@ class MainWindow(QMainWindow):
         change_storage_btn.clicked.connect(self.change_storage_path)
         storage_path_layout.addWidget(change_storage_btn)
 
-        open_storage_btn = QPushButton("打开存储目录")
-        open_storage_btn.clicked.connect(self.open_storage_directory)
+        open_storage_btn = QPushButton("刷新存储目录")
+        open_storage_btn.clicked.connect(self.refresh_storage_directory)
         storage_path_layout.addWidget(open_storage_btn)
 
         path_layout.addLayout(storage_path_layout)
@@ -1741,42 +1741,39 @@ class MainWindow(QMainWindow):
         for idx, dir_path in enumerate(self.storage_dirs, 1):
             self.log_message(f"  {idx}. {dir_path}")
         
-        # 更新Exis.json - 扫描所有存储目录
+        # 更新Exis.json - 扫描所有存储目录（增量更新）
         self.log_message("正在扫描所有存储目录中的视频文件...")
-        total_count = self.task_logger.batch_update_exis_file(self.storage_dirs)
+        total_count = self.task_logger.batch_update_exis_file(self.storage_dirs, incremental=True)
         for storage_dir in self.storage_dirs:
             self.log_message(f"已扫描目录: {storage_dir}")
         self.log_message(f"扫描完成，共找到 {total_count} 个唯一视频文件")
 
-    def open_storage_directory(self) -> None:
-        """打开存储目录（打开第一个目录）"""
+    def refresh_storage_directory(self) -> None:
+        """刷新存储目录：清空Exis.json并重新扫描所有存储目录"""
         try:
-            import platform
-            import os
-
             if not self.storage_dirs:
                 self.log_message("没有设置存储目录", "ERROR")
                 return
             
-            current_storage_dir = self.storage_dirs[0]
-            if not os.path.exists(current_storage_dir):
-                os.makedirs(current_storage_dir, exist_ok=True)
-                self.log_message(f"创建存储目录: {current_storage_dir}")
-
-            system = platform.system()
-            if system == "Windows":
-                os.startfile(current_storage_dir)
-            elif system == "Darwin":  # macOS
-                import subprocess
-                subprocess.Popen(["open", current_storage_dir])
-            else:  # Linux
-                import subprocess
-                subprocess.Popen(["xdg-open", current_storage_dir])
-
-            self.log_message(f"已打开存储目录: {current_storage_dir}")
+            self.log_message("🔄 开始刷新存储目录...")
+            
+            # 清空Exis.json
+            self.log_message("正在清空Exis.json...")
+            self.task_logger.clear_exis_file()
+            self.log_message("✓ Exis.json已清空")
+            
+            # 重新扫描所有存储目录
+            self.log_message("正在重新扫描所有存储目录中的视频文件...")
+            total_count = self.task_logger.batch_update_exis_file(self.storage_dirs, incremental=False)
+            
+            for storage_dir in self.storage_dirs:
+                self.log_message(f"  ✓ 已扫描: {storage_dir}")
+            
+            self.log_message(f"✅ 刷新完成，共找到 {total_count} 个唯一视频文件")
 
         except Exception as e:
-            self.log_message(f"打开存储目录失败: {str(e)}", "ERROR")
+            self.log_message(f"刷新存储目录失败: {str(e)}", "ERROR")
+            logger.error(f"刷新存储目录时出错", exc_info=True)
 
     def _check_latest_headless_setting(self) -> None:
         try:

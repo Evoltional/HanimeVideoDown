@@ -321,25 +321,41 @@ class TaskLogger:
             logger.error(f"扫描目录时出错: {e}")
             return []
 
-    def batch_update_exis_file(self, storage_dirs: List[str]) -> int:
+    def batch_update_exis_file(self, storage_dirs: List[str], incremental: bool = True) -> int:
         """
         批量扫描多个存储目录，更新Exis.json
         Exis.json格式：[{"filename": "文件名", "path": "完整路径"}, ...]
         按文件名排序
         :param storage_dirs: 存储目录列表
+        :param incremental: 是否增量更新（True=只添加不删除，False=清空后重新扫描）
         :return: 总共找到的视频文件数量
         """
         all_video_files = []
+        
+        # 如果是增量更新，先加载现有的视频文件
+        existing_videos = []
+        if incremental:
+            try:
+                with self.lock:
+                    if os.path.exists(self.exis_file):
+                        with open(self.exis_file, 'r', encoding='utf-8') as f:
+                            existing_videos = json.load(f)
+            except Exception as e:
+                logger.error(f"加载现有Exis.json时出错: {e}")
+                existing_videos = []
         
         # 扫描所有目录
         for storage_dir in storage_dirs:
             video_files = self.update_exis_file(storage_dir)
             all_video_files.extend(video_files)
         
+        # 合并现有文件和新扫描的文件
+        merged_files = existing_videos + all_video_files
+        
         # 去重（基于文件名）
         seen_filenames = set()
         unique_files = []
-        for file_info in all_video_files:
+        for file_info in merged_files:
             filename = file_info.get("filename", "")
             if filename not in seen_filenames:
                 seen_filenames.add(filename)
@@ -354,11 +370,28 @@ class TaskLogger:
                 with open(self.exis_file, 'w', encoding='utf-8') as f:
                     json.dump(unique_files, f, indent=4, ensure_ascii=False)
             
-            logger.info(f"已更新Exis.json，共找到 {len(unique_files)} 个唯一视频文件（已按名称排序）")
+            if incremental:
+                added_count = len(unique_files) - len(existing_videos)
+                logger.info(f"已更新Exis.json，新增 {added_count} 个文件，共 {len(unique_files)} 个唯一视频文件（已按名称排序）")
+            else:
+                logger.info(f"已更新Exis.json，共找到 {len(unique_files)} 个唯一视频文件（已按名称排序）")
             return len(unique_files)
         except Exception as e:
             logger.error(f"保存Exis.json时出错: {e}")
             return 0
+
+    def clear_exis_file(self) -> None:
+        """
+        清空Exis.json文件
+        """
+        try:
+            with self.lock:
+                with open(self.exis_file, 'w', encoding='utf-8') as f:
+                    json.dump([], f, indent=4, ensure_ascii=False)
+            logger.info("已清空Exis.json")
+        except Exception as e:
+            logger.error(f"清空Exis.json时出错: {e}")
+            raise
 
     def is_video_exists(self, filename: str) -> bool:
         """
