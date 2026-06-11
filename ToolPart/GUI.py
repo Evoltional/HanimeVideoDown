@@ -877,6 +877,25 @@ class MainWindow(QMainWindow):
         if len(urls) > 1:
             self.log_message(f"检测到 {len(urls)} 个链接，将依次创建下载任务...")
         
+        # 关键修改：在创建任务前检查最新的配置状态
+        latest_headless = self.config_manager.get("headless_mode", True)
+        latest_bypass = self.config_manager.get("bypass_mode", False)
+        
+        if self.headless_mode != latest_headless or self.bypass_mode != latest_bypass:
+            self.log_message(f"🔄 检测到配置变更，将使用最新设置：")
+            self.log_message(f"   无头模式: {self.headless_mode} -> {latest_headless}")
+            self.log_message(f"   Bypass模式: {self.bypass_mode} -> {latest_bypass}")
+            
+            # 更新主窗口的配置
+            self.headless_mode = latest_headless
+            self.bypass_mode = latest_bypass
+            
+            # 同步UI复选框状态
+            self.headless_checkbox.setChecked(latest_headless)
+            self.bypass_checkbox.setChecked(latest_bypass)
+        else:
+            self.log_message(f"✓ 配置已是最新：无头模式={latest_headless}, Bypass模式={latest_bypass}")
+        
         # 为每个链接创建任务
         created_count = 0
         for url in urls:
@@ -892,6 +911,25 @@ class MainWindow(QMainWindow):
     def _resume_all_tasks(self) -> None:
         """恢复或继续所有未完成的任务（相当于全部继续）"""
         self.log_message("🔄 正在检查并继续所有未完成的任务...")
+        
+        # 关键修改：在批量继续前检查最新的配置状态
+        latest_headless = self.config_manager.get("headless_mode", True)
+        latest_bypass = self.config_manager.get("bypass_mode", False)
+        
+        if self.headless_mode != latest_headless or self.bypass_mode != latest_bypass:
+            self.log_message(f"🔄 检测到配置变更，将使用最新设置：")
+            self.log_message(f"   无头模式: {self.headless_mode} -> {latest_headless}")
+            self.log_message(f"   Bypass模式: {self.bypass_mode} -> {latest_bypass}")
+            
+            # 更新主窗口的配置
+            self.headless_mode = latest_headless
+            self.bypass_mode = latest_bypass
+            
+            # 同步UI复选框状态
+            self.headless_checkbox.setChecked(latest_headless)
+            self.bypass_checkbox.setChecked(latest_bypass)
+        else:
+            self.log_message(f"✓ 配置已是最新：无头模式={latest_headless}, Bypass模式={latest_bypass}")
         
         # 获取所有未完成任务（状态不为 completed 或 running）
         all_tasks = self.task_logger.get_all_tasks()
@@ -1394,6 +1432,27 @@ class MainWindow(QMainWindow):
         if not task_info:
             self.log_message("未找到要恢复的任务")
             return
+
+        # 关键修改：恢复任务前检查最新的bypass和无头模式设置
+        latest_headless = self.config_manager.get("headless_mode", True)
+        latest_bypass = self.config_manager.get("bypass_mode", False)
+        
+        if worker.headless != latest_headless or worker.use_bypass != latest_bypass:
+            self.log_message(f"🔄 检测到配置变更，将使用最新设置：")
+            self.log_message(f"   无头模式: {worker.headless} -> {latest_headless}")
+            self.log_message(f"   Bypass模式: {worker.use_bypass} -> {latest_bypass}")
+            
+            # 更新worker的配置
+            worker.headless = latest_headless
+            worker.use_bypass = latest_bypass
+            
+            # 如果scraper已经创建，也需要更新其配置
+            if hasattr(worker, 'scraper') and worker.scraper:
+                worker.scraper.headless = latest_headless
+                worker.scraper.use_bypass = latest_bypass
+                worker.scraper.downloader.headless = latest_headless
+        else:
+            self.log_message(f"✓ 配置已是最新：无头模式={latest_headless}, Bypass模式={latest_bypass}")
 
         # 如果任务是已停止状态，则重新创建 worker 并替换（清空所有状态重新开始）
         if task_info['status'] == TaskManager.STATUS_STOPPED:

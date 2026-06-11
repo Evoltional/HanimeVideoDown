@@ -566,11 +566,13 @@ class HanimeScraper:
             logger.warning("获取视频链接前检测到暂停指令")
             return []
 
+        # 关键修改：使用 HanimeScraper 的 use_bypass 配置
         async with BrowserManager(headless=self.headless, download_dir=self.downloader.download_dir,
-                                  config_manager=self.config_manager, use_bypass=False) as browser:
+                                  config_manager=self.config_manager, use_bypass=self.use_bypass) as browser:
             self._track_browser(browser)
             try:
-                await browser.go_to(start_url, use_bypass=False)
+                # 关键修改：传递 use_bypass 参数，确保所有网页访问都遵循配置
+                await browser.go_to(start_url, use_bypass=self.use_bypass)
                 playlist_container = await browser.wait_for_element('//*[@id="playlist-scroll"]', timeout=10)
                 if playlist_container:
                     link_elements = await browser.find_element(
@@ -725,6 +727,11 @@ class HanimeScraper:
                     self._track_browser(browser)
                     try:
                         while True:
+                            # 关键修改：在每次从队列取任务前检查暂停/停止状态
+                            if hasattr(worker, 'should_stop') and worker.should_stop():
+                                logger.info("工作线程检测到停止指令，退出")
+                                break
+                            
                             try:
                                 # 从队列取出 (original_link, download_link) 元组
                                 original_link, download_link = self.link_queue.get(timeout=1)
@@ -746,6 +753,24 @@ class HanimeScraper:
                                     logger.error(f"未知的队列项类型: {type(item)}")
                                     self.link_queue.task_done()
                                     continue
+
+                            # 处理链接前再次检查暂停/停止
+                            if hasattr(worker, 'should_stop') and worker.should_stop():
+                                logger.info("处理链接前检测到停止指令")
+                                self.link_queue.task_done()
+                                break
+                            
+                            if hasattr(worker, 'should_pause'):
+                                while worker.should_pause(timeout=0.5):
+                                    if worker.should_stop():
+                                        logger.info("暂停期间检测到停止指令")
+                                        self.link_queue.task_done()
+                                        break
+                                else:
+                                    # 如果没有break（即没有停止），继续处理
+                                    if hasattr(worker, 'should_stop') and worker.should_stop():
+                                        self.link_queue.task_done()
+                                        break
 
                             try:
                                 success = await self._process_single_link_with_browser(
@@ -981,6 +1006,15 @@ class DownloadWorker(QThread):
             self.log_signal.emit(f"开始处理 {len(remaining_links)} 个剩余视频链接...")
         
         await self.scraper.process_links_batch(remaining_links, self)
+
+        # 关键修改：在处理完成后再次检查暂停/停止状态
+        if self.should_stop():
+            self.log_signal.emit("任务已被停止")
+            return False
+        
+        if self.should_pause():
+            self.log_signal.emit("任务已暂停")
+            return False
 
         failed_links = self.scraper.get_failed_links()
         if failed_links:
