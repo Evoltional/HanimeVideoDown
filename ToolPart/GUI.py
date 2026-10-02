@@ -12,9 +12,12 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QH
                              QLabel, QLineEdit, QPushButton, QTextEdit, QGroupBox,
                              QScrollArea, QFrame, QFileDialog, QCheckBox)
 
+import re
+
 from ToolPart.Config import ConfigManager
 from ToolPart.DownLoad import DownloadWorker
 from ToolPart.TaskLogger import TaskLogger
+from ToolPart.StorageManager import count_temporary_files, delete_temporary_files
 
 logger = logging.getLogger(__name__)
 
@@ -58,26 +61,6 @@ class StepTracker:
             "status": self.status,
             "details": self.details
         }
-
-
-class PerformanceOptimizer:
-    """性能优化器，用于优化浏览器操作和减少等待时间"""
-
-    PAGE_LOAD_TIMEOUT = 2
-    ELEMENT_WAIT_TIMEOUT = 3
-    RETRY_ATTEMPTS = 2
-
-    @staticmethod
-    def optimize_browser_settings() -> Dict:
-        return {
-            "page_load_timeout": PerformanceOptimizer.PAGE_LOAD_TIMEOUT,
-            "element_wait_timeout": PerformanceOptimizer.ELEMENT_WAIT_TIMEOUT,
-            "retry_attempts": PerformanceOptimizer.RETRY_ATTEMPTS
-        }
-
-    @staticmethod
-    def calculate_optimal_delay(base_delay: float, attempt: int) -> float:
-        return base_delay * (1.5 ** attempt)
 
 
 def _update_task_ui_status(task_frame, status_text, status_color,
@@ -399,26 +382,25 @@ class TaskManager:
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        print("1. 开始初始化配置")
+        logger.info("1. 开始初始化配置")
         self.config_manager = ConfigManager()
-        print("2. 配置加载完成")
+        logger.info("2. 配置加载完成")
         self.task_logger = TaskLogger()
-        print("3. TaskLogger初始化完成")
+        logger.info("3. TaskLogger初始化完成")
         self.step_trackers: Dict[str, List[StepTracker]] = {}
-        print("4. 步骤追踪器初始化完成")
-        self.performance_optimizer = PerformanceOptimizer()
-        
+        logger.info("4. 步骤追踪器初始化完成")
+
         # 初始化任务完成计数器（每次启动程序清零）
         self.completed_task_count = 0
-        print("4.5. 初始化任务完成计数器")
+        logger.info("4.5. 初始化任务完成计数器")
 
         window_pos = self.config_manager.get("window_position", [100, 100])
         window_size = self.config_manager.get("window_size", [1000, 800])
-        print(f"5. 设置窗口位置: {window_pos}, 窗口大小: {window_size}")
+        logger.info(f"5. 设置窗口位置: {window_pos}, 窗口大小: {window_size}")
         self.setGeometry(window_pos[0], window_pos[1], window_size[0], window_size[1])
-        print("6. 设置窗口完成")
+        logger.info("6. 设置窗口完成")
         self.setWindowTitle("Hanime视频下载器")
-        print("7. 设置窗口标题完成")
+        logger.info("7. 设置窗口标题完成")
         self.setStyleSheet("""
             QMainWindow {
                 background-color: #2c3e50;
@@ -505,23 +487,24 @@ class MainWindow(QMainWindow):
                 background-color: #3498db;
             }
         """)
-        print("8. 设置样式表完成")
+        logger.info("8. 设置样式表完成")
         self.download_dir = self.config_manager.get("download_dir", os.path.join(os.getcwd(), "Download"))
-        print(f"9. 设置下载目录为: {self.download_dir}")
+        logger.info(f"9. 设置下载目录为: {self.download_dir}")
         # 支持多个存储目录
         self.storage_dirs = self.config_manager.get("storage_dirs", [os.path.join(os.getcwd(), "Download")])
         if not isinstance(self.storage_dirs, list):
             self.storage_dirs = [self.storage_dirs]
         self.storage_dir = self.storage_dirs[0] if self.storage_dirs else os.path.join(os.getcwd(), "Download")
-        print(f"9.5. 设置存储目录为: {self.storage_dirs}")
+        logger.info(f"9.5. 设置存储目录为: {self.storage_dirs}")
         self.headless_mode = self.config_manager.get("headless_mode", True)
-        print(f"10. 设置无头模式为: {self.headless_mode}")
+        logger.info(f"10. 设置无头模式为: {self.headless_mode}")
         self.bypass_mode = self.config_manager.get("bypass_mode", False)  # 读取Bypass设置
-        print(f"11. 读取Bypass设置: {self.bypass_mode}")
-        self.task_manager = TaskManager(max_active_tasks=2, task_logger=self.task_logger)
-        print("12. 初始化任务管理器完成")
+        logger.info(f"11. 读取Bypass设置: {self.bypass_mode}")
+        max_active_tasks = self.config_manager.get("max_active_tasks", 2) if self.config_manager else 2
+        self.task_manager = TaskManager(max_active_tasks=max_active_tasks, task_logger=self.task_logger)
+        logger.info("12. 初始化任务管理器完成")
         self.init_ui()
-        print("13. 初始化UI完成")
+        logger.info("13. 初始化UI完成")
         
         # 初始化时扫描所有存储目录并更新Exis.json
         self.log_message("正在初始化，扫描所有存储目录中的视频文件...")
@@ -990,7 +973,6 @@ class MainWindow(QMainWindow):
 
     def _parse_multiple_urls(self, text: str) -> List[str]:
         """解析文本中的多个URL，支持空格、换行、逗号分隔"""
-        import re
         # 使用正则表达式提取所有 hanime1.me 的链接
         pattern = r'https?://hanime1\.me/watch\?v=[^\s,;，；]+' 
         urls = re.findall(pattern, text)
@@ -1009,7 +991,11 @@ class MainWindow(QMainWindow):
         """创建单个下载任务"""
         task_creation_step = self.start_step_log("main", "创建下载任务")
         try:
-            opt_settings = self.performance_optimizer.optimize_browser_settings()
+            cfg = self.config_manager
+            opt_settings = {
+                "page_load_timeout": cfg.get("page_load_timeout", 60) if cfg else 60,
+                "element_wait_timeout": cfg.get("element_wait_timeout", 10) if cfg else 10,
+            }
             self.log_message(f"应用性能优化设置: 页面加载超时{opt_settings['page_load_timeout']}秒, "
                              f"元素等待{opt_settings['element_wait_timeout']}秒")
 
@@ -1268,45 +1254,16 @@ class MainWindow(QMainWindow):
             logger.error("彻底清理所有任务资源时出错", exc_info=True)
 
     def _count_temporary_files(self, worker: DownloadWorker, task_id: str) -> int:
-        try:
-            count = 0
-            download_dir = getattr(worker, 'download_dir', None)
-            if not download_dir:
-                if self.task_logger and task_id:
-                    all_tasks = self.task_logger.get_all_tasks()
-                    if task_id in all_tasks:
-                        download_dir = all_tasks[task_id].get('download_dir')
-            if download_dir and os.path.exists(download_dir):
-                try:
-                    files = os.listdir(download_dir)
-                    count = len([f for f in files if f.startswith('下载中_') and f.endswith('.mp4')])
-                except Exception:
-                    pass
-            return count
-        except Exception:
-            return 0
+        download_dir = getattr(worker, 'download_dir', None)
+        if not download_dir:
+            if self.task_logger and task_id:
+                all_tasks = self.task_logger.get_all_tasks()
+                if task_id in all_tasks:
+                    download_dir = all_tasks[task_id].get('download_dir')
+        return count_temporary_files(download_dir)
 
     def _delete_global_temporary_files(self) -> int:
-        try:
-            deleted_count = 0
-            if os.path.exists(self.download_dir):
-                try:
-                    files = os.listdir(self.download_dir)
-                    for filename in files:
-                        if filename.startswith('下载中_') and filename.endswith('.mp4'):
-                            temp_file_path = os.path.join(self.download_dir, filename)
-                            try:
-                                os.remove(temp_file_path)
-                                deleted_count += 1
-                                self.log_message(f"已删除全局临时文件: {filename}")
-                            except Exception as e:
-                                self.log_message(f"删除全局临时文件失败 {filename}: {str(e)}", "WARNING")
-                except Exception as e:
-                    self.log_message(f"扫描全局临时文件时出错: {str(e)}", "WARNING")
-            return deleted_count
-        except Exception as e:
-            self.log_message(f"删除全局临时文件时出错: {str(e)}", "ERROR")
-            return 0
+        return delete_temporary_files(self.download_dir, log_func=self.log_message)
 
     def clear_all_tasks(self) -> None:
         try:

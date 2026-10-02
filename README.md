@@ -124,14 +124,18 @@ pip install pyinstaller
 
 ### 执行打包
 
-#### 方式一：标准打包（推荐）
+#### 方式一：标准打包（推荐 `--onedir`）
+> 本项目依赖 `pydoll`（自带/自动下载 Chromium），使用 `--onefile` 会把巨量依赖压进单文件，
+> 启动更慢且 Chromium 路径管理更易出问题。**推荐使用 `--onedir`**。
+
 ```bash
-pyinstaller --onefile --windowed --name VideoDown VideoDown.py
+pyinstaller --onedir --windowed --name VideoDown VideoDown.py
 ```
 
-#### 方式二：带图标打包
+#### 方式二：带图标打包（图标可选）
 ```bash
-pyinstaller --onefile --windowed --name VideoDown --icon=app.ico VideoDown.py
+# app.ico 需自行准备并放在项目根目录；若没有图标可省略 --icon 参数
+pyinstaller --onedir --windowed --name VideoDown --icon=app.ico VideoDown.py
 ```
 
 ### 打包参数说明
@@ -176,4 +180,35 @@ del VideoDown.spec
 - **实时日志**：查看详细的下载速度、剩余时间等信息
 - **步骤追踪**：每个任务的解析、下载、合并步骤都有时间和状态记录
 - **性能分析**：日志中包含各步骤耗时，便于优化和排查问题
+
+
+## 🛠️ 高级配置与开发
+
+### 并发与性能配置
+
+`config.json`（首次运行自动生成）中与性能相关的字段：
+
+| 字段 | 默认值 | 说明 |
+|------|--------|------|
+| `max_active_tasks` | `2` | 全局同时运行的任务数（任务级并发） |
+| `max_workers` | `2` | 单个任务内并发抓取/下载的工作线程数 |
+| `element_wait_timeout` | `10` | 元素等待超时（秒），已实际作用于页面解析 |
+| `page_load_timeout` | `60` | 页面加载超时（秒） |
+
+> 真实并发上限 ≈ `max_active_tasks × max_workers` 个浏览器实例。
+> 在配置较低的机器上可适当调小，或在内存充足的机器上适当调大以提升吞吐。
+
+### 依赖说明
+
+`requirements.txt` **不再包含** `asyncio`——Python 3.10+ 已内置标准库 `asyncio`，
+早期 PyPI 上的同名兼容包仅支持 `<3.5`，强行安装会导致 `pip install` 失败。
+
+### 运行测试
+
+项目使用 `pyproject.toml` 管理依赖，`tests/` 下为纯逻辑单元测试（不依赖 PyQt/浏览器）：
+
+```bash
+pip install -e ".[dev]"
+pytest
+```
 

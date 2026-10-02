@@ -1,4 +1,8 @@
 pyqt5~=5.15.9
-asyncio~=3.4.3
 requests~=2.32.4
 pydoll-python
+# 注意：
+# 1. 不要安装 PyPI 上的 `asyncio` 包——它是仅支持 Python <3.5 的兼容回退包，
+#    在 Python 3.10+ 上 `pip install` 会直接失败。本项目使用的是标准库 asyncio。
+# 2. pydoll-python 未锁版本：建议锁定为你环境中已验证可用的版本（如 pydoll-python==x.y.z），
+#    以保证打包/部署可复现。
