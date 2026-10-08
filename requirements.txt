@@ -1,8 +1,14 @@
 pyqt5~=5.15.9
 requests~=2.32.4
-pydoll-python
+pydoll-python==3.0.0
 # 注意：
 # 1. 不要安装 PyPI 上的 `asyncio` 包——它是仅支持 Python <3.5 的兼容回退包，
 #    在 Python 3.10+ 上 `pip install` 会直接失败。本项目使用的是标准库 asyncio。
-# 2. pydoll-python 未锁版本：建议锁定为你环境中已验证可用的版本（如 pydoll-python==x.y.z），
-#    以保证打包/部署可复现。
+# 2. pydoll-python 已锁定为 3.0.0（2026-09-29 发布的重大破坏性更新版本）。
+#    - 3.0 的 Cloudflare Turnstile 选择器已修复：从旧版的 span.cb-i 改为
+#      input[type="checkbox"]，并新增官方异步上下文管理器
+#      `async with tab.expect_cloudflare_turnstile(time_to_wait_captcha=...):`。
+#    - Tab.find(xpath=...)/Tab.find(css=...) 已移除，统一改用 Tab.query(expression)，
+#      且 timeout 单位从毫秒改为秒。
+#    - ChromiumOptions 已移除 page_load_timeout，页面加载超时改由 tab.go_to(timeout=...)。
+#    BrowserManager.py 已按上述 3.0 变化迁移；若升级大版本需重新核对这些 API。

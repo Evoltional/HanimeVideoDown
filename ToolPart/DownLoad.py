@@ -9,6 +9,8 @@ from typing import Dict, List, Optional, Tuple
 import requests
 from PyQt5.QtCore import QThread, pyqtSignal
 
+from pydoll.exceptions import NavigationError
+
 from ToolPart.BrowserManager import BrowserManager
 from ToolPart.utils import sanitize_filename
 from ToolPart.SiteHandlers import (
@@ -17,6 +19,7 @@ from ToolPart.SiteHandlers import (
     is_video_link,
     parse_video_id,
     extract_button_info,
+    get_attr,
     XPATH_PLAYLIST_CONTAINER,
     XPATH_PLAYLIST_LINKS,
     XPATH_DOWNLOAD_TABLE,
@@ -92,21 +95,51 @@ class VideoDownloader:
             elif '/watch?' in download_page_url:
                 logger.info("⚠ 检测到 watch 页面，需要解析视频列表")
 
-            await browser.go_to(download_page_url, use_bypass=use_bypass)
+            # 性能优化（关键）：watch 页已经清过 Cloudflare，cf_clearance 在同标签页/
+            # 同源下会持久化，后续 download 页通常不再弹 Turnstile。直接用非 bypass
+            # 模式访问，可避免 expect_cloudflare_turnstile 一直阻塞到页面 load 事件
+            # （实测每个 download 页因此多等 ~19s）。若没拿到表格（偶发重新挑战），
+            # 再回退用 bypass 重试一次兜底。
+            table_element = None
+            for attempt_bp in ([use_bypass] if use_bypass else [False, True]):
+                # 关键修复（第十轮）：并行预取时，刚绕过 Cloudflare 的页面往往仍处于
+                # "请稍候…" 的 JS 重定向中间态，此刻立刻 go_to 到 download 页会被这次
+                # 重定向中止，pydoll 抛 NavigationError(net::ERR_ABORTED)。对导航单独
+                # 重试一次，避免一个瞬时的 ERR_ABORTED 整条丢掉一个视频链接。
+                nav_ok = False
+                for nav_retry in range(2):  # 至多重试一次导航
+                    try:
+                        await browser.go_to(download_page_url, use_bypass=attempt_bp)
+                        nav_ok = True
+                        break
+                    except NavigationError as ne:
+                        logger.warning(
+                            f"导航被中止（ERR_ABORTED，第 {nav_retry + 1} 次），稍后重试: "
+                            f"{download_page_url} - {ne}"
+                        )
+                        await asyncio.sleep(1.0)
+                if not nav_ok:
+                    logger.warning(f"导航多次失败，跳过本方式: {download_page_url}")
+                    continue
+                # 下载页同样会先经过 Cloudflare + "请稍候…"加载页，#content-div 表格可能
+                # 延迟出现，故把等待时间放宽到至少 30s，避免还没渲染完就判定失败。
+                wait = max(self.element_wait_timeout, 30)
+                # 等待表格出现
+                table_element = await browser.wait_for_element(
+                    XPATH_DOWNLOAD_TABLE,
+                    timeout=wait
+                )
+                if table_element:
+                    break
+                logger.warning(f"未找到下载链接列表表格（use_bypass={attempt_bp}），尝试下一方式")
 
-            wait = self.element_wait_timeout
-            # 等待表格出现
-            table_element = await browser.wait_for_element(
-                XPATH_DOWNLOAD_TABLE,
-                timeout=wait
-            )
             if not table_element:
                 logger.warning("未找到下载链接列表表格")
                 return None, None
 
             logger.info("找到下载链接列表表格")
 
-            # 查找下载按钮
+            # 查找下载按钮（真正的 a 元素，带 data-url）
             first_download_btn = await browser.wait_for_element(
                 XPATH_DOWNLOAD_BUTTON,
                 timeout=wait
@@ -474,7 +507,7 @@ class VideoDownloader:
 
 class HanimeScraper:
     def __init__(self, max_workers=2, headless=True, download_dir="./downloads", task_logger=None, task_id=None,
-                 config_manager=None, use_bypass=False):
+                 config_manager=None, use_bypass=False, max_prefetch_browsers=4):
         self.all_video_links = set()
         self.download_links = []
         self.downloader = VideoDownloader(download_dir=download_dir, headless=headless)
@@ -484,6 +517,11 @@ class HanimeScraper:
         self.headless = headless
         self.config_manager = config_manager
         self.use_bypass = use_bypass
+        # 预取阶段并行浏览器数（默认 4，硬上限 4；可由 config.json 的 max_prefetch_browsers 覆盖）
+        self.max_prefetch_browsers = (
+            int(config_manager.get("max_prefetch_browsers", max_prefetch_browsers))
+            if config_manager else max_prefetch_browsers
+        )
 
         self.link_queue = queue.Queue()
         self.results = []
@@ -568,33 +606,98 @@ class HanimeScraper:
             return []
 
         await browser.go_to(start_url, use_bypass=self.use_bypass)
-        playlist_container = await browser.wait_for_element(XPATH_PLAYLIST_CONTAINER, timeout=10)
-        if playlist_container:
-            link_elements = await browser.find_element(
-                xpath=XPATH_PLAYLIST_LINKS,
-                find_all=True,
-                timeout=10,
-                raise_exc=False,
-            )
+
+        # 关键修复：hanime1.me 通过 Cloudflare 后会先显示"请稍候…"加载页，
+        # #playlist-scroll 可能先以空壳 / 占位 a 元素出现，真正的 a.overlay
+        # （watch?v=...）链接由 JS 在加载完成后才注入。因此不能只等"有 a 元素"，
+        # 必须轮询直到出现真正匹配的视频链接（最多 ~30s）。
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + 30
+        container_seen = False
+        while loop.time() < deadline:
+            if await self.check_stop(worker) or await self.check_pause(worker):
+                break
+            try:
+                link_elements = await browser.find_element(
+                    xpath=XPATH_PLAYLIST_LINKS, find_all=True, timeout=0, raise_exc=False
+                )
+            except Exception as exc:
+                logger.debug(f"轮询播放列表链接时出错（可能页面正在重定向）: {exc}")
+                link_elements = None
+
             if link_elements:
+                container_seen = True
                 for element in link_elements:
                     if await self.check_stop(worker) or await self.check_pause(worker):
                         break
                     try:
-                        href = await element.get_attribute('href')
+                        # 关键修复：pydoll 3.0 的 get_attribute 是同步方法，
+                        # 不能 await，否则抛 TypeError 被 except 吞掉 → 0 链接。
+                        # 改用 get_attr（同步优先 + JS 回退）。
+                        href = await get_attr(element, 'href')
                     except Exception as exc:
                         logger.debug(f"获取 href 失败: {exc}")
                         continue
                     if is_video_link(href):
                         self.all_video_links.add(href)
-        else:
-            logger.warning("未找到playlist-scroll容器")
+                if self.all_video_links:
+                    break
+            await asyncio.sleep(0.5)
+
+        if not self.all_video_links:
+            # 诊断：容器/链接都没等到 → 多半"请稍候…"没解析完或选择器不匹配
+            try:
+                final_url = await browser.tab.current_url()
+                final_title = await browser.tab.title()
+            except Exception as e:
+                final_url, final_title = '(读取失败)', f'({e})'
+            logger.warning(
+                f"未找到有效视频链接 (URL: {final_url} | 标题: {final_title} | 容器初见: {container_seen})"
+            )
+            try:
+                html = await browser.tab.page_source()
+                markers = {
+                    'playlist-scroll': 'id="playlist-scroll"' in html,
+                    'content-div': 'id="content-div"' in html,
+                    '含 playlist 文本': 'playlist' in html.lower(),
+                    '含 watch?v= 文本': 'watch?v=' in html,
+                }
+                logger.warning(f"页面源码标记检测: {markers} | 源码长度: {len(html)}")
+                debug_path = os.path.join(
+                    os.path.dirname(os.path.abspath(__file__)), '..', 'Logger', 'debug_page.html'
+                )
+                with open(debug_path, 'w', encoding='utf-8') as f:
+                    f.write(html)
+                logger.warning(f"已保存页面源码到: {os.path.abspath(debug_path)}（本地调试用）")
+            except Exception as e:
+                logger.warning(f"保存页面源码失败: {e}")
 
         video_links_list = list(self.all_video_links)
         logger.info(f"获取到 {len(video_links_list)} 个视频链接")
         if self.task_logger and self.task_id:
             self.task_logger.add_video_links(self.task_id, video_links_list)
         return video_links_list
+
+    async def _wait_page_settled(self, browser: BrowserManager, timeout: int = 12) -> None:
+        """等待页面离开"请稍候…"加载态，避免随后的导航被正在进行的重定向中止（ERR_ABORTED）。
+
+        仅用于预取阶段：bypass Cloudflare 后，hanime1.me 会先显示"请稍候…"加载页，
+        再由前端 JS 重定向到真实内容。若此时立刻 go_to 到 download 页，该重定向会
+        abort 新导航，pydoll 抛 net::ERR_ABORTED，造成该浏览器首个下载链接被整条跳过。
+        轮询直到标题不再是"请稍候…"（即真实内容已就位）再继续。
+        """
+        if not browser or not getattr(browser, 'tab', None):
+            return
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        while loop.time() < deadline:
+            try:
+                title = await browser.tab.title()
+            except Exception:
+                title = None
+            if title and title.strip() != "请稍候…":
+                return
+            await asyncio.sleep(0.5)
 
     async def _prefetch_direct_urls(self, browser: BrowserManager, links: List[str], worker=None) -> Dict[str, Tuple[str, str]]:
         """对给定链接（watch/download）逐一提取直接下载地址，返回 original_link -> (video_url, filename)。"""
@@ -605,7 +708,7 @@ class HanimeScraper:
             download_link = build_download_url(link)
             try:
                 video_url, filename = await self.downloader.extract_download_info(
-                    download_link, worker, browser=browser, use_bypass=self.use_bypass
+                    download_link, worker, browser=browser, use_bypass=False
                 )
             except Exception as exc:
                 logger.warning(f"预取直接链接异常: {link} - {exc}")
@@ -616,34 +719,116 @@ class HanimeScraper:
                 logger.warning(f"预取直接链接失败（无有效地址）: {link}")
         return direct_map
 
-    async def prepare_links(self, start_url: str, worker=None) -> Tuple[List[str], Dict[str, Tuple[str, str]]]:
-        """单个浏览器完成：抓取播放列表 + 预取每个视频的直接下载地址。
+    @staticmethod
+    def _split_round_robin(items: List[str], n: int) -> List[List[str]]:
+        """把 items 按 n 路 round-robin 切分，保证各浏览器负载均衡。"""
+        n = max(1, int(n))
+        return [items[i::n] for i in range(n)]
 
-        返回 (video_links, direct_map)。direct_map 供 worker 线程免浏览器下载使用，
-        从而把每个任务的浏览器数量从 (1 + max_workers) 降到 1。
+    def _prefetch_chunk_in_thread(self, chunk, prime_url, worker, result_dict, lock):
+        """线程内：独立事件循环 + 独立浏览器，预取一个分片，结果写入 result_dict（加锁）。
+
+        每个预取浏览器都在自己的线程里跑独立的 asyncio 事件循环，
+        与下载阶段 _process_worker 的并发模型一致，彻底隔离 pydoll 状态、
+        避免多个浏览器共享连接/回调引发的冲突。
         """
-        logger.info("预取阶段：使用单个浏览器抓取列表并提取直接下载链接")
-        async with BrowserManager(headless=self.headless, download_dir=self.downloader.download_dir,
-                                  config_manager=self.config_manager, use_bypass=self.use_bypass) as browser:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        browser = None
+        try:
+            browser = BrowserManager(headless=self.headless, download_dir=self.downloader.download_dir,
+                                      config_manager=self.config_manager, use_bypass=self.use_bypass)
+            loop.run_until_complete(browser.start())
             self._track_browser(browser)
-            try:
-                video_links = await self._fetch_playlist(browser, start_url, worker)
-                direct_map = await self._prefetch_direct_urls(browser, video_links, worker)
-                logger.info(f"预取完成：列表 {len(video_links)} 条，成功提取直接链接 {len(direct_map)} 条")
-                return video_links, direct_map
-            finally:
+            # 预清除 Cloudflare：先 bypass 访问一次（watch/download 页）拿到 cf_clearance，
+            # 之后本线程内所有 download 页用 use_bypass=False 即可秒过（见第八轮优化）。
+            if prime_url:
+                try:
+                    loop.run_until_complete(browser.go_to(prime_url, use_bypass=True))
+                    # 关键修复（第十轮）：bypass 后的 watch/download 页会先停留在"请稍候…"，
+                    # 随后由 JS 重定向到真实内容。若立刻导航到 download 页，这次重定向会
+                    # 中止（net::ERR_ABORTED）新导航，导致该浏览器首个链接提取失败。
+                    # 等待首屏真正稳定（标题不再是"请稍候…"）后再开始逐条预取。
+                    loop.run_until_complete(self._wait_page_settled(browser, timeout=12))
+                except Exception as e:
+                    logger.warning(f"预清除 Cloudflare 失败（后续按需回退 bypass）: {e}")
+            partial = loop.run_until_complete(self._prefetch_direct_urls(browser, chunk, worker))
+            if isinstance(partial, dict):
+                with lock:
+                    result_dict.update(partial)
+        except Exception as e:
+            logger.exception(f"预取分片线程异常: {e}")
+        finally:
+            if browser is not None:
                 self._untrack_browser(browser)
+                try:
+                    loop.run_until_complete(browser.close())
+                except Exception:
+                    pass
+            loop.close()
+
+    async def _run_parallel_prefetch(self, chunks, prime_url, worker) -> Dict[str, Tuple[str, str]]:
+        """并发启动各分片线程，join 后合并 direct_map。"""
+        result_dict: Dict[str, Tuple[str, str]] = {}
+        lock = threading.Lock()
+        threads = []
+        for chunk in chunks:
+            if not chunk:
+                continue
+            t = threading.Thread(
+                target=self._prefetch_chunk_in_thread,
+                args=(chunk, prime_url, worker, result_dict, lock),
+                daemon=True,
+            )
+            t.start()
+            threads.append(t)
+        for t in threads:
+            t.join()
+        return result_dict
+
+    async def prepare_links(self, start_url: str, worker=None) -> Tuple[List[str], Dict[str, Tuple[str, str]]]:
+        """并行预取：最多开 max_prefetch_browsers（≤4）个浏览器——
+        1 个抓播放列表，其余并发抓各视频的直接下载地址。
+
+        返回 (video_links, direct_map)。direct_map 供 worker 线程免浏览器下载使用。
+        """
+        n = max(1, min(int(self.max_prefetch_browsers), 4))
+        logger.info(f"预取阶段：先抓播放列表，再用 {n} 个浏览器并行提取直接下载链接")
+
+        # 1) 单个浏览器抓播放列表（顺带清 Cloudflare；随后关闭，预取用全新浏览器以隔离状态）
+        b0 = BrowserManager(headless=self.headless, download_dir=self.downloader.download_dir,
+                            config_manager=self.config_manager, use_bypass=self.use_bypass)
+        await b0.start()
+        self._track_browser(b0)
+        video_links: List[str] = []
+        try:
+            video_links = await self._fetch_playlist(b0, start_url, worker)
+        finally:
+            self._untrack_browser(b0)
+            try:
+                await b0.close()
+            except Exception:
+                pass
+
+        if not video_links:
+            return video_links, {}
+
+        # 2) 按浏览器数 round-robin 切分，各线程并发预取；prime_url 用 watch 页给每个浏览器设 cf_clearance
+        chunks = self._split_round_robin(video_links, n)
+        direct_map = await self._run_parallel_prefetch(chunks, start_url, worker)
+        logger.info(f"预取完成：列表 {len(video_links)} 条，成功提取直接链接 {len(direct_map)} 条")
+        return video_links, direct_map
 
     async def prepare_direct_map(self, links: List[str], worker=None) -> Dict[str, Tuple[str, str]]:
-        """针对已有链接（如重试的失败链接）单独预取直接下载地址。"""
-        logger.info(f"预取阶段：针对 {len(links)} 个链接提取直接下载链接")
-        async with BrowserManager(headless=self.headless, download_dir=self.downloader.download_dir,
-                                  config_manager=self.config_manager, use_bypass=self.use_bypass) as browser:
-            self._track_browser(browser)
-            try:
-                return await self._prefetch_direct_urls(browser, links, worker)
-            finally:
-                self._untrack_browser(browser)
+        """针对已有链接（如重试的失败链接）并行预取直接下载地址（同样最多开 max_prefetch_browsers 个浏览器）。"""
+        if not links:
+            return {}
+        n = max(1, min(int(self.max_prefetch_browsers), 4))
+        logger.info(f"预取阶段：针对 {len(links)} 个链接，使用 {n} 个浏览器并行提取直接下载链接")
+        chunks = self._split_round_robin(links, n)
+        # prime_url 用首个链接的 download 页给每个浏览器设 cf_clearance
+        prime_url = build_download_url(links[0])
+        return await self._run_parallel_prefetch(chunks, prime_url, worker)
 
     def update_progress(self, filename: str, progress: str):
         with self.downloading_files_lock:
@@ -734,7 +919,7 @@ class HanimeScraper:
 
         try:
             video_url_real, filename = await self.downloader.extract_download_info(
-                download_link, worker, browser=browser, use_bypass=self.use_bypass
+                download_link, worker, browser=browser, use_bypass=False
             )
             if not video_url_real or not filename:
                 self.remove_processing(original_link)

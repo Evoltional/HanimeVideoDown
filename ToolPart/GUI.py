@@ -673,14 +673,23 @@ class MainWindow(QMainWindow):
 
         # 新增：Bypass模式复选框
         self.bypass_checkbox = QCheckBox("启用Bypass")
+        # 初始化时先断开信号，避免在校验前（log_area 尚未创建）触发 log_message 崩溃
+        self.bypass_checkbox.blockSignals(True)
         self.bypass_checkbox.setChecked(self.bypass_mode)
+        self.bypass_checkbox.blockSignals(False)
         self.bypass_checkbox.stateChanged.connect(self.on_bypass_changed)
         url_input_layout.addWidget(self.bypass_checkbox)
 
         self.headless_checkbox = QCheckBox("无头模式")
+        self.headless_checkbox.blockSignals(True)
         self.headless_checkbox.setChecked(self.headless_mode)
+        self.headless_checkbox.blockSignals(False)
         self.headless_checkbox.stateChanged.connect(self.on_headless_changed)
         url_input_layout.addWidget(self.headless_checkbox)
+
+        # 初始化即依据 Bypass 状态强制同步无头控件：Bypass 开启时关闭并禁用无头，
+        # 避免从脏配置（bypass=True 但 headless=True）启动时违反约束。
+        self._sync_headless_state()
 
         input_layout.addLayout(url_input_layout)
         input_layout.addSpacing(10)
@@ -746,10 +755,40 @@ class MainWindow(QMainWindow):
     def on_bypass_changed(self, state: int) -> None:
         self.bypass_mode = (state == Qt.Checked)
         if self.bypass_mode:
-            self.log_message("已启用Bypass模式（处理Cloudflare验证）")
+            self.log_message("已启用Bypass模式（处理Cloudflare验证）：无头模式已自动关闭且不可开启")
         else:
-            self.log_message("已禁用Bypass模式（普通访问）")
+            self.log_message("已禁用Bypass模式（普通访问）：无头模式可自由调整")
         self.config_manager.set("bypass_mode", self.bypass_mode)
+        # Bypass 开启时强制无头关闭并禁用控件；关闭后恢复可自由调整
+        self._sync_headless_state()
+        # 持久化无头状态（Bypass 开启时强制为 False）
+        self.config_manager.set("headless_mode", self.headless_mode)
+
+    def _sync_headless_state(self) -> None:
+        """依据 Bypass 状态同步"无头模式"控件与生效值：
+
+        - Bypass 开启 → 无头模式强制关闭且禁用（不可开启）；
+        - Bypass 关闭 → 无头模式恢复可自由调整，状态跟随 self.headless_mode。
+        必须在 headless_checkbox / bypass_checkbox 均已创建后调用。
+        同时把生效值持久化到配置，避免脏配置（bypass=True 但 headless=True）
+        在后续启动或恢复任务时被读回而重新违反约束。
+        """
+        if not hasattr(self, 'headless_checkbox') or not hasattr(self, 'bypass_checkbox'):
+            return
+        self.headless_checkbox.blockSignals(True)
+        try:
+            if self.bypass_mode:
+                self.headless_mode = False
+                self.headless_checkbox.setChecked(False)
+                self.headless_checkbox.setDisabled(True)
+                # 持久化修正后的无头状态
+                if hasattr(self, 'config_manager'):
+                    self.config_manager.set("headless_mode", False)
+            else:
+                self.headless_checkbox.setDisabled(False)
+                self.headless_checkbox.setChecked(bool(self.headless_mode))
+        finally:
+            self.headless_checkbox.blockSignals(False)
 
     def paste_clipboard(self) -> None:
         try:
@@ -863,7 +902,10 @@ class MainWindow(QMainWindow):
         # 关键修改：在创建任务前检查最新的配置状态
         latest_headless = self.config_manager.get("headless_mode", True)
         latest_bypass = self.config_manager.get("bypass_mode", False)
-        
+        # 约束：Bypass 开启时强制无头关闭，避免从脏配置读回 True
+        if latest_bypass:
+            latest_headless = False
+
         if self.headless_mode != latest_headless or self.bypass_mode != latest_bypass:
             self.log_message(f"🔄 检测到配置变更，将使用最新设置：")
             self.log_message(f"   无头模式: {self.headless_mode} -> {latest_headless}")
@@ -872,10 +914,11 @@ class MainWindow(QMainWindow):
             # 更新主窗口的配置
             self.headless_mode = latest_headless
             self.bypass_mode = latest_bypass
-            
-            # 同步UI复选框状态
-            self.headless_checkbox.setChecked(latest_headless)
+
+            # 同步UI复选框状态（_sync_headless_state 会依据 Bypass 正确
+            # 处理无头复选框的勾选与禁用状态，避免只改勾选却未禁用）
             self.bypass_checkbox.setChecked(latest_bypass)
+            self._sync_headless_state()
         else:
             self.log_message(f"✓ 配置已是最新：无头模式={latest_headless}, Bypass模式={latest_bypass}")
         
@@ -898,7 +941,10 @@ class MainWindow(QMainWindow):
         # 关键修改：在批量继续前检查最新的配置状态
         latest_headless = self.config_manager.get("headless_mode", True)
         latest_bypass = self.config_manager.get("bypass_mode", False)
-        
+        # 约束：Bypass 开启时强制无头关闭，避免从脏配置读回 True
+        if latest_bypass:
+            latest_headless = False
+
         if self.headless_mode != latest_headless or self.bypass_mode != latest_bypass:
             self.log_message(f"🔄 检测到配置变更，将使用最新设置：")
             self.log_message(f"   无头模式: {self.headless_mode} -> {latest_headless}")
@@ -907,10 +953,11 @@ class MainWindow(QMainWindow):
             # 更新主窗口的配置
             self.headless_mode = latest_headless
             self.bypass_mode = latest_bypass
-            
-            # 同步UI复选框状态
-            self.headless_checkbox.setChecked(latest_headless)
+
+            # 同步UI复选框状态（_sync_headless_state 会依据 Bypass 正确
+            # 处理无头复选框的勾选与禁用状态，避免只改勾选却未禁用）
             self.bypass_checkbox.setChecked(latest_bypass)
+            self._sync_headless_state()
         else:
             self.log_message(f"✓ 配置已是最新：无头模式={latest_headless}, Bypass模式={latest_bypass}")
         
@@ -1393,7 +1440,10 @@ class MainWindow(QMainWindow):
         # 关键修改：恢复任务前检查最新的bypass和无头模式设置
         latest_headless = self.config_manager.get("headless_mode", True)
         latest_bypass = self.config_manager.get("bypass_mode", False)
-        
+        # 约束：Bypass 开启时强制无头关闭，避免从脏配置读回 True
+        if latest_bypass:
+            latest_headless = False
+
         if worker.headless != latest_headless or worker.use_bypass != latest_bypass:
             self.log_message(f"🔄 检测到配置变更，将使用最新设置：")
             self.log_message(f"   无头模式: {worker.headless} -> {latest_headless}")
@@ -1794,10 +1844,16 @@ class MainWindow(QMainWindow):
     def _check_latest_headless_setting(self) -> None:
         try:
             latest_headless = self.config_manager.get("headless_mode", True)
+            latest_bypass = self.config_manager.get("bypass_mode", False)
+            # 约束：Bypass 开启时强制无头关闭，避免从脏配置读回 True
+            if latest_bypass:
+                latest_headless = False
             if self.headless_mode != latest_headless:
                 self.log_message(f"检测到无头模式设置更新: {self.headless_mode} -> {latest_headless}")
                 self.headless_mode = latest_headless
                 self.headless_checkbox.setChecked(self.headless_mode)
+            # 不论是否变化，都按 Bypass 状态重新同步控件可用性
+            self._sync_headless_state()
         except Exception as e:
             self.log_message(f"检查无头模式设置时出错: {str(e)}，使用当前设置: {self.headless_mode}")
 
