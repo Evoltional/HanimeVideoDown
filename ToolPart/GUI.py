@@ -500,6 +500,8 @@ class MainWindow(QMainWindow):
         logger.info(f"10. 设置无头模式为: {self.headless_mode}")
         self.bypass_mode = self.config_manager.get("bypass_mode", False)  # 读取Bypass设置
         logger.info(f"11. 读取Bypass设置: {self.bypass_mode}")
+        self.single_video_mode = self.config_manager.get("single_video_mode", False)  # 读取"仅下载输入链接"设置
+        logger.info(f"11.5. 读取仅下载输入链接设置: {self.single_video_mode}")
         max_active_tasks = self.config_manager.get("max_active_tasks", 2) if self.config_manager else 2
         self.task_manager = TaskManager(max_active_tasks=max_active_tasks, task_logger=self.task_logger)
         logger.info("12. 初始化任务管理器完成")
@@ -583,7 +585,7 @@ class MainWindow(QMainWindow):
         self._check_latest_headless_setting()
         # 从配置读取当前的Bypass模式
         use_bypass = self.config_manager.get("bypass_mode", False)
-        worker = DownloadWorker(url, download_dir, self.headless_mode, use_bypass, task_logger=self.task_logger, task_id=task_id, config_manager=self.config_manager, is_restored=True)
+        worker = DownloadWorker(url, download_dir, self.headless_mode, use_bypass, task_logger=self.task_logger, task_id=task_id, config_manager=self.config_manager, is_restored=True, single_video_mode=self.config_manager.get("single_video_mode", False))
         worker.log_signal.connect(self.log_message)
         worker.finished_signal.connect(self.on_download_finished)
         worker.progress_signal.connect(lambda progress, w=worker: self.update_task_progress(w, progress))
@@ -695,6 +697,18 @@ class MainWindow(QMainWindow):
         input_layout.addSpacing(10)
 
         button_layout = QHBoxLayout()
+        # 新增：仅下载输入链接（跳过整个播放列表抓取）
+        self.single_video_checkbox = QCheckBox("仅下载此链接")
+        self.single_video_checkbox.setToolTip(
+            "勾选后：只下载输入框中的视频链接，不抓取该页面所在播放列表的全部视频"
+        )
+        self.single_video_checkbox.blockSignals(True)
+        self.single_video_checkbox.setChecked(self.single_video_mode)
+        self.single_video_checkbox.blockSignals(False)
+        self.single_video_checkbox.stateChanged.connect(self.on_single_video_changed)
+        self.single_video_checkbox.setStyleSheet("color: #f39c12; font-weight: bold;")
+        button_layout.addWidget(self.single_video_checkbox)
+
         self.download_btn = QPushButton("开始下载")
         self.download_btn.clicked.connect(self.start_download)
         button_layout.addWidget(self.download_btn)
@@ -763,6 +777,15 @@ class MainWindow(QMainWindow):
         self._sync_headless_state()
         # 持久化无头状态（Bypass 开启时强制为 False）
         self.config_manager.set("headless_mode", self.headless_mode)
+
+    def on_single_video_changed(self, state: int) -> None:
+        """切换"仅下载输入链接"模式，并持久化到配置。"""
+        self.single_video_mode = (state == Qt.Checked)
+        if self.single_video_mode:
+            self.log_message("已启用「仅下载此链接」：将跳过播放列表抓取，只下载输入框中的视频")
+        else:
+            self.log_message("已关闭「仅下载此链接」：恢复抓取视频所在页面的整个播放列表")
+        self.config_manager.set("single_video_mode", self.single_video_mode)
 
     def _sync_headless_state(self) -> None:
         """依据 Bypass 状态同步"无头模式"控件与生效值：
@@ -1020,9 +1043,12 @@ class MainWindow(QMainWindow):
 
     def _parse_multiple_urls(self, text: str) -> List[str]:
         """解析文本中的多个URL，支持空格、换行、逗号分隔"""
-        # 使用正则表达式提取所有 hanime1.me 的链接
-        pattern = r'https?://hanime1\.me/watch\?v=[^\s,;，；]+' 
+        # 使用正则表达式提取所有 hanime1.me 的视频链接（watch / download 均可）
+        # download 链接会在"仅下载此链接"模式下被规范化为 watch 链接
+        pattern = r'https?://hanime1\.me/(?:watch|download)\?v=[^\s,;，；]+'
         urls = re.findall(pattern, text)
+        # 去掉链接尾部可能被一起粘贴进来的标点（右括号、句号等）
+        urls = [u.rstrip(')）]】}。.,;；') for u in urls]
         
         # 去重并保持顺序
         seen = set()
@@ -1050,7 +1076,8 @@ class MainWindow(QMainWindow):
             # 读取当前的Bypass选项
             use_bypass = self.bypass_checkbox.isChecked()
             worker = DownloadWorker(url, self.download_dir, self.headless_mode, use_bypass, task_logger=self.task_logger,
-                                    task_id=task_id, config_manager=self.config_manager)
+                                    task_id=task_id, config_manager=self.config_manager,
+                                    single_video_mode=self.single_video_checkbox.isChecked())
             worker.log_signal.connect(self.log_message)
             worker.finished_signal.connect(self.on_download_finished)
             worker.progress_signal.connect(lambda progress, w=worker: self.update_task_progress(w, progress))
@@ -1071,6 +1098,7 @@ class MainWindow(QMainWindow):
                 "无头模式": self.headless_mode,
                 "Bypass模式": use_bypass,
                 "最大并发数": self.task_manager.max_active_tasks,
+                "仅下载此链接": self.single_video_checkbox.isChecked(),
                 "性能优化": opt_settings
             }
             self.log_detailed_message(f"已添加下载任务: {url}", "INFO", task_details)

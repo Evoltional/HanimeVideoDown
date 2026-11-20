@@ -56,6 +56,7 @@ class ConfigManager:
             "storage_dirs": [os.path.join(os.getcwd(), "Download")],  # 新增：支持多个存储目录
             "headless_mode": True,
             "bypass_mode": False,  # 新增：是否启用Bypass
+            "single_video_mode": False,  # 新增：仅下载输入链接的视频（不抓取整个播放列表）
             "max_workers": 2,  # 单个任务内并发抓取/下载的工作线程数
             "max_active_tasks": 2,  # 全局同时运行的任务数（任务级并发）
             "window_position": [100, 100],

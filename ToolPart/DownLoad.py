@@ -507,7 +507,7 @@ class VideoDownloader:
 
 class HanimeScraper:
     def __init__(self, max_workers=2, headless=True, download_dir="./downloads", task_logger=None, task_id=None,
-                 config_manager=None, use_bypass=False, max_prefetch_browsers=4):
+                 config_manager=None, use_bypass=False, max_prefetch_browsers=4, single_video_mode=False):
         self.all_video_links = set()
         self.download_links = []
         self.downloader = VideoDownloader(download_dir=download_dir, headless=headless)
@@ -517,6 +517,8 @@ class HanimeScraper:
         self.headless = headless
         self.config_manager = config_manager
         self.use_bypass = use_bypass
+        # 仅下载输入链接：跳过播放列表抓取，直接把输入链接当作唯一视频
+        self.single_video_mode = single_video_mode
         # 预取阶段并行浏览器数（默认 4，硬上限 4；可由 config.json 的 max_prefetch_browsers 覆盖）
         self.max_prefetch_browsers = (
             int(config_manager.get("max_prefetch_browsers", max_prefetch_browsers))
@@ -792,6 +794,24 @@ class HanimeScraper:
 
         返回 (video_links, direct_map)。direct_map 供 worker 线程免浏览器下载使用。
         """
+        # 模式A：仅下载输入链接 —— 完全跳过播放列表抓取，避免把整个列表的视频都加入下载队列
+        if self.single_video_mode:
+            watch_url = build_watch_url(start_url)
+            # is_video_link 只认 https 前缀，补一下 http 输入
+            if watch_url.startswith('http://'):
+                watch_url = 'https://' + watch_url[len('http://'):]
+            if not is_video_link(watch_url):
+                logger.warning(f"单视频模式下输入链接不是有效的视频链接: {start_url}")
+                return [], {}
+            video_links = [watch_url]
+            self.all_video_links.add(watch_url)
+            if self.task_logger and self.task_id:
+                self.task_logger.add_video_links(self.task_id, video_links)
+            logger.info(f"单视频模式：仅处理输入链接 {watch_url}，跳过播放列表抓取")
+            direct_map = await self.prepare_direct_map(video_links, worker)
+            return video_links, direct_map
+
+        # 模式B（默认）：抓取整个播放列表后批量预取
         n = max(1, min(int(self.max_prefetch_browsers), 4))
         logger.info(f"预取阶段：先抓播放列表，再用 {n} 个浏览器并行提取直接下载链接")
 
@@ -1091,7 +1111,7 @@ class DownloadWorker(QThread):
     _progress_lock = threading.Lock()
 
     def __init__(self, url: str, download_dir: str, headless: bool, use_bypass: bool, task_logger=None, task_id=None,
-                 config_manager=None, is_restored=False):
+                 config_manager=None, is_restored=False, single_video_mode=False):
         super().__init__()
         self.url = url
         self.download_dir = download_dir
@@ -1110,6 +1130,7 @@ class DownloadWorker(QThread):
         self.retry_failed_links = False
         self.failed_links_to_retry = []
         self.is_restored = is_restored
+        self.single_video_mode = single_video_mode
         self._loop = None
         self.retry_count = 0  # 任务重试计数器
         self.max_task_retries = 3  # 最大任务重试次数
@@ -1127,6 +1148,10 @@ class DownloadWorker(QThread):
             self._detect_headless_setting()
             self.log_signal.emit(f"当前无头模式设置: {'启用' if self.headless else '禁用'}")
             self.log_signal.emit(f"当前Bypass模式设置: {'启用' if self.use_bypass else '禁用'}")
+            self.log_signal.emit(
+                "当前下载模式: 仅下载输入链接（跳过播放列表抓取）" if self.single_video_mode
+                else "当前下载模式: 抓取整个播放列表并批量下载"
+            )
 
             max_workers = self.config_manager.get("max_workers", 2) if self.config_manager else 2
             self.scraper = HanimeScraper(
@@ -1136,7 +1161,8 @@ class DownloadWorker(QThread):
                 task_logger=self.task_logger,
                 task_id=self.task_id,
                 config_manager=self.config_manager,
-                use_bypass=self.use_bypass
+                use_bypass=self.use_bypass,
+                single_video_mode=self.single_video_mode
             )
             self.scraper.downloader.element_wait_timeout = (
                 self.config_manager.get("element_wait_timeout", 10) if self.config_manager else 10
